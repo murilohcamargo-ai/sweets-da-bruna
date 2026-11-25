@@ -1,11 +1,12 @@
 import streamlit as st
 from supabase import create_client
-from streamlit_js_eval import get_geolocation
+from streamlit_js_eval import get_geolocation, streamlit_js_eval
 import pandas as pd
 import requests
 import urllib.parse
 import math
 import uuid
+import hashlib
 import os
 import io
 import re
@@ -18,19 +19,69 @@ NOME_EMPRESA = "Sweets da Bruna"
 CNPJ_EMPRESA = "36.810.827/0001-08"
 ARQUIVO_LOGO = "logo.png"
 
+# --- CREDENCIAIS E CONFIGURAÇÕES ---
+SUPABASE_URL = "https://urghdzleaeocrsrvcnzx.supabase.co"
+SUPABASE_KEY = "sb_publishable_Xmc5ZOqss7NH2fuQgIvyFg_iy5DYwN6"
+
+WHATSAPP_LOJA = "5566999999999"       # DDI + DDD + Número da Bruna (só números)
+CPF_ADMIN = "062.582.881-03"          # CPF da Bruna (aceita com ou sem pontos)
+SENHA_ADMIN = "1234"                  # Senha de acesso
+CHAVE_PIX = "36810827000108"          # Chave Pix da empresa
+NOME_RECEBEDOR = "SWEETS DA BRUNA"    # Até 25 letras, sem acento
+CIDADE_RECEBEDOR = "RONDONOPOLIS"     # Até 15 letras, sem acento
+
+# --- LOCALIZAÇÃO DA DOCERIA (Rua Nicola Silveira, 470 - Jardim Primavera, Rondonópolis - MT) ---
+LAT_LOJA = -16.4478
+LON_LOJA = -54.6167
+
+# --- TABELA DE PREÇOS DO ENTREGADOR ---
+TABELA_FRETE = [
+    (2.0, 6.00),
+    (4.0, 9.00),
+    (6.0, 12.00),
+    (10.0, 16.00),
+]
+DISTANCIA_MAXIMA_KM = 10.0
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- CONFIGURAÇÕES DA LOJA ---
+def obter_config_loja() -> dict:
+    try:
+        res = supabase.table("config_loja").select("*").eq("id", 1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+    return {
+        "aberta": True,
+        "fidelidade_ativa": True,
+        "meta_valor": 50.0,
+        "fidelidade_desconto": 15,
+        "ultimo_numero_dia": 0,
+        "logo_url": None,
+        "inicio_dia": datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    }
+
+def salvar_config_loja(dados: dict):
+    dados["id"] = 1
+    supabase.table("config_loja").upsert(dados).execute()
+
+config_loja = obter_config_loja()
+logo_atual_url = config_loja.get("logo_url")
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     page_title=f"{NOME_EMPRESA} | Pronta Entrega",
-    page_icon=ARQUIVO_LOGO if os.path.exists(ARQUIVO_LOGO) else "🧁",
+    page_icon=logo_atual_url if logo_atual_url else (ARQUIVO_LOGO if os.path.exists(ARQUIVO_LOGO) else "🧁"),
     layout="centered"
 )
 
-# --- VISUAL CLEAN APP (OPÇÃO B - DESIGN MODERNO & TECNOLÓGICO) ---
+# --- VISUAL CLEAN APP (DESIGN MODERNO & TECNOLÓGICO) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
-    /* Tipografia e fundo global */
     html, body, [class*="css"] {
         font-family: 'Plus Jakarta Sans', sans-serif !important;
     }
@@ -39,12 +90,10 @@ st.markdown("""
         background: linear-gradient(180deg, #FFF1F5 0%, #F8FAFC 240px, #F8FAFC 100%);
     }
 
-    /* Limpar menus e barras padrões */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header[data-testid="stHeader"] {background: transparent;}
 
-    /* Botões principais e secundários modernos */
     div.stButton > button, div.stLinkButton > a, div.stDownloadButton > button {
         border-radius: 14px !important;
         padding: 0.65rem 1.25rem !important;
@@ -54,7 +103,6 @@ st.markdown("""
         transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
 
-    /* Botões de destaque (primary) e ação */
     div.stButton > button[kind="primary"],
     div.stLinkButton > a[kind="primary"],
     div.stDownloadButton > button[kind="primary"] {
@@ -72,7 +120,6 @@ st.markdown("""
         filter: brightness(1.04) !important;
     }
 
-    /* Botões secundários com visual SaaS limpo */
     div.stButton > button[kind="secondary"],
     div.stLinkButton > a[kind="secondary"] {
         background: #FFFFFF !important;
@@ -97,7 +144,6 @@ st.markdown("""
         box-shadow: none !important;
     }
 
-    /* Cartões (containers com borda) elevados */
     div[data-testid="stVerticalBlockBorderWrapper"] {
         background: #FFFFFF !important;
         border-radius: 20px !important;
@@ -112,13 +158,11 @@ st.markdown("""
         box-shadow: 0 12px 30px rgba(225, 29, 72, 0.09) !important;
     }
 
-    /* Imagens dos produtos arredondadas */
     div[data-testid="stImage"] img {
         border-radius: 14px !important;
         object-fit: cover !important;
     }
 
-    /* Abas (Tabs) estilo aplicativo moderno */
     div[data-baseweb="tab-list"] {
         gap: 6px !important;
         background: #F1F5F9 !important;
@@ -146,7 +190,6 @@ st.markdown("""
         display: none !important;
     }
 
-    /* Inputs e campos de texto modernos */
     div[data-baseweb="input"] > div,
     div[data-baseweb="select"] > div,
     div[data-baseweb="base-input"] > input {
@@ -160,7 +203,6 @@ st.markdown("""
         box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.14) !important;
     }
 
-    /* Métricas financeiras (KPIs) no topo do Admin */
     div[data-testid="stMetric"] {
         background: #F8FAFC !important;
         border: 1px solid #E2E8F0 !important;
@@ -168,7 +210,6 @@ st.markdown("""
         padding: 14px 16px !important;
     }
 
-    /* Alertas (success, info, warning, error) mais suaves */
     div[data-testid="stAlert"] {
         border-radius: 14px !important;
         border: none !important;
@@ -177,32 +218,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CREDENCIAIS E CONFIGURAÇÕES ---
-SUPABASE_URL = "https://urghdzleaeocrsrvcnzx.supabase.co"
-SUPABASE_KEY = "sb_publishable_Xmc5ZOqss7NH2fuQgIvyFg_iy5DYwN6"
+# --- CONTROLE DE SESSÃO PERSISTENTE (CPF + SENHA SALVOS NO NAVEGADOR) ---
+def gerar_token_admin() -> str:
+    cpf_limpo = re.sub(r"\D", "", CPF_ADMIN)
+    segredo = f"SWEETS_AUTH_{cpf_limpo}_{SENHA_ADMIN}_{CNPJ_EMPRESA}"
+    return hashlib.sha256(segredo.encode("utf-8")).hexdigest()
 
-WHATSAPP_LOJA = "5566999999999"       # DDI + DDD + Número da Bruna (só números)
-SENHA_ADMIN = "1234"                  # Senha da Bruna
-CHAVE_PIX = "36810827000108"          # Chave Pix da empresa
-NOME_RECEBEDOR = "SWEETS DA BRUNA"    # Até 25 letras, sem acento
-CIDADE_RECEBEDOR = "RONDONOPOLIS"     # Até 15 letras, sem acento
-
-# --- LOCALIZAÇÃO DA DOCERIA (CLIQUE COM BOTÃO DIREITO NO GOOGLE MAPS E COPIE) ---
-LAT_LOJA = -16.4673
-LON_LOJA = -54.6372
-
-# --- TABELA DE PREÇOS DO ENTREGADOR (ATÉ X KM : VALOR EM R$) ---
-TABELA_FRETE = [
-    (2.0, 6.00),    # Até 2 km -> R$ 6,00
-    (4.0, 9.00),    # De 2,1 a 4 km -> R$ 9,00
-    (6.0, 12.00),   # De 4,1 a 6 km -> R$ 12,00
-    (10.0, 16.00),  # De 6,1 a 10 km -> R$ 16,00
-]
-DISTANCIA_MAXIMA_KM = 10.0
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- FORMATAÇÃO DE TELEFONE NO PADRÃO 669.999-9999 ---
 def formatar_telefone(valor: str) -> tuple[str, bool]:
     digitos = re.sub(r"\D", "", valor)[:11]
     if len(digitos) == 10:
@@ -210,27 +231,6 @@ def formatar_telefone(valor: str) -> tuple[str, bool]:
     elif len(digitos) == 11:
         return f"{digitos[:3]}.{digitos[3:7]}-{digitos[7:]}", True
     return digitos, False
-
-# --- CONFIGURAÇÕES DA LOJA ---
-def obter_config_loja() -> dict:
-    try:
-        res = supabase.table("config_loja").select("*").eq("id", 1).execute()
-        if res.data:
-            return res.data[0]
-    except Exception:
-        pass
-    return {
-        "aberta": True,
-        "fidelidade_ativa": True,
-        "meta_valor": 50.0,
-        "fidelidade_desconto": 15,
-        "ultimo_numero_dia": 0,
-        "inicio_dia": datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    }
-
-def salvar_config_loja(dados: dict):
-    dados["id"] = 1
-    supabase.table("config_loja").upsert(dados).execute()
 
 def gerar_proximo_numero_dia() -> int:
     cfg = obter_config_loja()
@@ -387,8 +387,10 @@ def verificar_premio_fidelidade(telefone_formatado: str, valor_pedido: float, co
         }).execute()
         return {"ganhou": False, "saldo_atual": novo_saldo, "meta_atual": meta_atual}
 
-# --- LOGO ---
-def obter_logo_base64():
+# --- LOGO (BANCO OU ARQUIVO LOCAL) ---
+def obter_logo_src():
+    if logo_atual_url:
+        return logo_atual_url
     for ext in ["logo.png", "logo.jpg", "logo.jpeg"]:
         if os.path.exists(ext):
             with open(ext, "rb") as f:
@@ -466,18 +468,31 @@ def buscar_cupom(codigo: str):
     res = supabase.table("cupons").select("*").eq("codigo", codigo.strip().upper()).eq("ativo", True).execute()
     return res.data[0] if res.data else None
 
-def upload_foto(arquivo):
+def upload_foto(arquivo, tamanho=(800, 800)):
     if not arquivo:
         return None
     img = Image.open(arquivo).convert("RGB")
-    img.thumbnail((800, 800))
+    img.thumbnail(tamanho)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+    img.save(buf, format="JPEG", quality=88)
     nome_arq = f"{uuid.uuid4().hex}.jpg"
     supabase.storage.from_("fotos").upload(nome_arq, buf.getvalue(), {"content-type": "image/jpeg"})
     return supabase.storage.from_("fotos").get_public_url(nome_arq)
 
 # --- MODAIS ---
+@st.dialog("📷 Foto de Perfil / Logo da Loja")
+def modal_logo_loja():
+    st.caption("Escolha uma imagem da sua galeria ou computador para usar como foto de perfil da Sweets da Bruna:")
+    nova_logo = st.file_uploader("Selecionar imagem da logo", type=["jpg", "jpeg", "png"])
+    if nova_logo:
+        st.image(nova_logo, width=150)
+        if st.button("✅ Salvar como Logo Oficial", type="primary", use_container_width=True):
+            url_logo = upload_foto(nova_logo, tamanho=(500, 500))
+            config_loja["logo_url"] = url_logo
+            salvar_config_loja(config_loja)
+            st.toast("Logo atualizada com sucesso!")
+            st.rerun()
+
 @st.dialog("📦 Quantos você fez hoje?")
 def modal_estoque(produto):
     if produto.get("imagem_url"):
@@ -585,20 +600,38 @@ if "dados_entrega" not in st.session_state:
     st.session_state.dados_entrega = None
 if "cupom_aplicado" not in st.session_state:
     st.session_state.cupom_aplicado = None
+if "admin_logado" not in st.session_state:
+    st.session_state.admin_logado = False
+if "gravar_login_ls" not in st.session_state:
+    st.session_state.gravar_login_ls = False
+if "limpar_login_ls" not in st.session_state:
+    st.session_state.limpar_login_ls = False
 
-config_loja = obter_config_loja()
 aberta = bool(config_loja.get("aberta", True))
-
-# --- CONTROLE DE ACESSO INVISÍVEL PARA O CLIENTE ---
 eh_admin = st.query_params.get("admin") == "1"
 
-# --- CABEÇALHO MODERNO ---
-logo_b64 = obter_logo_base64()
-if logo_b64:
+# Persistência de login no navegador
+if eh_admin:
+    token_esperado = gerar_token_admin()
+    if st.session_state.gravar_login_ls:
+        streamlit_js_eval(js_expressions=f"localStorage.setItem('sweets_bruna_auth', '{token_esperado}')", key="js_save_auth")
+        st.session_state.gravar_login_ls = False
+    if st.session_state.limpar_login_ls:
+        streamlit_js_eval(js_expressions="localStorage.removeItem('sweets_bruna_auth')", key="js_clear_auth")
+        st.session_state.limpar_login_ls = False
+    elif not st.session_state.admin_logado:
+        token_salvo = streamlit_js_eval(js_expressions="localStorage.getItem('sweets_bruna_auth')", key="js_read_auth")
+        if token_salvo == token_esperado:
+            st.session_state.admin_logado = True
+            st.rerun()
+
+# --- CABEÇALHO MODERNO COM FOTO DE PERFIL ---
+logo_src = obter_logo_src()
+if logo_src:
     st.markdown(
         f"""
         <div style='text-align: center; padding: 14px 0 10px 0;'>
-            <img src='{logo_b64}' style='width: 112px; height: 112px; object-fit: cover; border-radius: 50%; border: 3px solid #FFFFFF; box-shadow: 0 8px 24px rgba(225, 29, 72, 0.18); margin-bottom: 10px;' />
+            <img src='{logo_src}' style='width: 116px; height: 116px; object-fit: cover; border-radius: 50%; border: 4px solid #FFFFFF; box-shadow: 0 8px 24px rgba(225, 29, 72, 0.22); margin-bottom: 10px;' />
             <h1 style='margin: 0; font-size: 30px; font-weight: 800; color: #0F172A; letter-spacing: -0.5px;'>{NOME_EMPRESA}</h1>
             <div style='display: inline-block; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 999px; padding: 4px 14px; margin-top: 6px; font-size: 12px; font-weight: 600; color: #64748B;'>
                 CNPJ: {CNPJ_EMPRESA} • Pronta Entrega
@@ -609,14 +642,14 @@ if logo_b64:
     )
     if eh_admin:
         st.sidebar.markdown(
-            f"<div style='text-align:center;'><img src='{logo_b64}' style='width:80px; height:80px; border-radius:50%; object-fit:cover; border: 2px solid #E11D48;'/></div>",
+            f"<div style='text-align:center;'><img src='{logo_src}' style='width:80px; height:80px; border-radius:50%; object-fit:cover; border: 2px solid #E11D48;'/></div>",
             unsafe_allow_html=True
         )
 else:
     st.markdown(
         f"""
         <div style='text-align: center; padding: 14px 0 10px 0;'>
-            <div style='display: inline-flex; align-items: center; justify-content: center; width: 68px; height: 68px; border-radius: 22px; background: linear-gradient(135deg, #E11D48 0%, #FB7185 100%); color: white; font-size: 34px; box-shadow: 0 8px 20px rgba(225, 29, 72, 0.25); margin-bottom: 10px;'>
+            <div style='display: inline-flex; align-items: center; justify-content: center; width: 76px; height: 76px; border-radius: 50%; background: linear-gradient(135deg, #E11D48 0%, #FB7185 100%); color: white; font-size: 36px; border: 4px solid #FFFFFF; box-shadow: 0 8px 20px rgba(225, 29, 72, 0.25); margin-bottom: 10px;'>
                 🧁
             </div>
             <h1 style='margin: 0; font-size: 30px; font-weight: 800; color: #0F172A; letter-spacing: -0.5px;'>{NOME_EMPRESA}</h1>
@@ -888,10 +921,37 @@ if modo == "🧁 Vitrine do Cliente":
 # TELA 2: ÁREA DA CONFEITEIRA
 # ==========================================
 elif modo == "🔐 Área da Confeiteira":
-    st.subheader("🔐 Bancada da Confeiteira")
-    senha = st.text_input("Senha", type="password")
+    if not st.session_state.admin_logado:
+        with st.container(border=True):
+            st.markdown("### 🔐 Acesso da Confeiteira")
+            st.caption("Entre com seu CPF e senha. Você continuará logada neste dispositivo.")
+            with st.form("form_login_admin"):
+                cpf_digitado = st.text_input("CPF", placeholder="062.582.881-03", max_chars=14)
+                senha_digitada = st.text_input("Senha", type="password", placeholder="••••")
+                manter_conectada = st.checkbox("Manter conectada neste dispositivo", value=True)
+                if st.form_submit_button("🔓 Entrar na Bancada", type="primary", use_container_width=True):
+                    cpf_dig_limpo = re.sub(r"\D", "", cpf_digitado)
+                    cpf_cad_limpo = re.sub(r"\D", "", CPF_ADMIN)
+                    if cpf_dig_limpo == cpf_cad_limpo and senha_digitada == SENHA_ADMIN:
+                        st.session_state.admin_logado = True
+                        if manter_conectada:
+                            st.session_state.gravar_login_ls = True
+                        st.rerun()
+                    else:
+                        st.error("CPF ou senha incorretos.")
+    else:
+        c_top1, c_top2, c_top3 = st.columns([2.2, 1.3, 0.9])
+        with c_top1:
+            st.subheader("🔐 Bancada da Confeiteira")
+        with c_top2:
+            if st.button("📷 Foto / Logo", use_container_width=True):
+                modal_logo_loja()
+        with c_top3:
+            if st.button("🚪 Sair", use_container_width=True):
+                st.session_state.admin_logado = False
+                st.session_state.limpar_login_ls = True
+                st.rerun()
 
-    if senha == SENHA_ADMIN:
         with st.container(border=True):
             c_st, c_b1, c_b2 = st.columns([1.8, 1.1, 1.3])
             with c_st:
@@ -1236,8 +1296,6 @@ elif modo == "🔐 Área da Confeiteira":
                     type="primary",
                     use_container_width=True
                 )
-    elif senha:
-        st.error("Senha incorreta.")
 
 # --- RODAPÉ OFICIAL ---
 st.divider()
