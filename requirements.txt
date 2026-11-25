@@ -1,0 +1,7 @@
+streamlit
+supabase
+pillow
+pandas
+openpyxl
+requests
+streamlit-js-eval

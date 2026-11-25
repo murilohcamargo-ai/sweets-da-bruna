@@ -1,0 +1,1084 @@
+import streamlit as st
+from supabase import create_client
+from streamlit_js_eval import get_geolocation
+import pandas as pd
+import requests
+import urllib.parse
+import math
+import uuid
+import os
+import io
+import re
+import base64
+from datetime import datetime
+from PIL import Image
+
+# --- DADOS OFICIAIS DA EMPRESA ---
+NOME_EMPRESA = "Sweets da Bruna"
+CNPJ_EMPRESA = "36.810.827/0001-08"
+ARQUIVO_LOGO = "logo.png"
+
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(
+    page_title=f"{NOME_EMPRESA} | Pronta Entrega",
+    page_icon=ARQUIVO_LOGO if os.path.exists(ARQUIVO_LOGO) else "🧁",
+    layout="centered"
+)
+
+# --- CREDENCIAIS E CONFIGURAÇÕES ---
+SUPABASE_URL = "https://urghdzleaeocrsrvcnzx.supabase.co"
+SUPABASE_KEY = "sb_publishable_Xmc5ZOqss7NH2fuQgIvyFg_iy5DYwN6"
+
+WHATSAPP_LOJA = "5566999999999"       # DDI + DDD + Número da Bruna (só números)
+SENHA_ADMIN = "1234"                  # Senha da Bruna
+CHAVE_PIX = "36810827000108"          # Chave Pix da empresa
+NOME_RECEBEDOR = "SWEETS DA BRUNA"    # Até 25 letras, sem acento
+CIDADE_RECEBEDOR = "RONDONOPOLIS"     # Até 15 letras, sem acento
+
+# --- LOCALIZAÇÃO DA DOCERIA (CLIQUE COM BOTÃO DIREITO NO GOOGLE MAPS E COPIE) ---
+LAT_LOJA = -16.4673
+LON_LOJA = -54.6372
+
+# --- TABELA DE PREÇOS DO ENTREGADOR (ATÉ X KM : VALOR EM R$) ---
+TABELA_FRETE = [
+    (2.0, 6.00),    # Até 2 km -> R$ 6,00
+    (4.0, 9.00),    # De 2,1 a 4 km -> R$ 9,00
+    (6.0, 12.00),   # De 4,1 a 6 km -> R$ 12,00
+    (10.0, 16.00),  # De 6,1 a 10 km -> R$ 16,00
+]
+DISTANCIA_MAXIMA_KM = 10.0
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- FORMATAÇÃO DE TELEFONE NO PADRÃO 669.999-9999 ---
+def formatar_telefone(valor: str) -> tuple[str, bool]:
+    digitos = re.sub(r"\D", "", valor)[:11]
+    if len(digitos) == 10:
+        return f"{digitos[:3]}.{digitos[3:6]}-{digitos[6:]}", True
+    elif len(digitos) == 11:
+        return f"{digitos[:3]}.{digitos[3:7]}-{digitos[7:]}", True
+    return digitos, False
+
+# --- CONFIGURAÇÕES DA LOJA ---
+def obter_config_loja() -> dict:
+    try:
+        res = supabase.table("config_loja").select("*").eq("id", 1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+    return {
+        "aberta": True,
+        "fidelidade_ativa": True,
+        "meta_valor": 50.0,
+        "fidelidade_desconto": 15,
+        "ultimo_numero_dia": 0,
+        "inicio_dia": datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    }
+
+def salvar_config_loja(dados: dict):
+    dados["id"] = 1
+    supabase.table("config_loja").upsert(dados).execute()
+
+def gerar_proximo_numero_dia() -> int:
+    cfg = obter_config_loja()
+    proximo = int(cfg.get("ultimo_numero_dia", 0)) + 1
+    cfg["ultimo_numero_dia"] = proximo
+    salvar_config_loja(cfg)
+    return proximo
+
+# --- RESUMO FINANCEIRO DO DIA ---
+def obter_resumo_financeiro_dia(produtos: list, config: dict) -> dict:
+    valor_falta_vender = sum(float(p["preco"]) * int(p["estoque"]) for p in produtos)
+    qtd_falta_vender = sum(int(p["estoque"]) for p in produtos)
+
+    inicio_dia = config.get("inicio_dia")
+    query = supabase.table("pedidos").select("total, frete, itens")
+    if inicio_dia:
+        query = query.gte("criado_em", inicio_dia)
+    pedidos_dia = query.execute().data or []
+
+    valor_vendido = sum(max(0.0, float(p.get("total", 0)) - float(p.get("frete", 0))) for p in pedidos_dia)
+
+    qtd_vendida = 0
+    for ped in pedidos_dia:
+        for parte in (ped.get("itens") or "").split(" | "):
+            m = re.match(r"^(\d+)x\s+", parte)
+            if m:
+                qtd_vendida += int(m.group(1))
+
+    valor_total_produzido = valor_vendido + valor_falta_vender
+    qtd_total_produzida = qtd_vendida + qtd_falta_vender
+    percentual_vendido = (valor_vendido / valor_total_produzido * 100) if valor_total_produzido > 0 else 0.0
+
+    return {
+        "produzido_rs": valor_total_produzido,
+        "produzido_un": qtd_total_produzida,
+        "vendido_rs": valor_vendido,
+        "vendido_un": qtd_vendida,
+        "falta_rs": valor_falta_vender,
+        "falta_un": qtd_falta_vender,
+        "percentual": percentual_vendido,
+    }
+
+# --- RELATÓRIOS POR PERÍODO ---
+def gerar_relatorio_periodo(periodo: str, produtos: list) -> dict:
+    agora = datetime.now()
+    query = supabase.table("pedidos").select("total, frete, itens, criado_em")
+
+    if periodo == "Hoje":
+        inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        query = query.gte("criado_em", inicio)
+    elif periodo == "Este Mês":
+        inicio = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        query = query.gte("criado_em", inicio)
+    elif periodo == "Este Ano":
+        inicio = agora.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        query = query.gte("criado_em", inicio)
+
+    pedidos = query.execute().data or []
+
+    faturamento_doces = 0.0
+    total_frete = 0.0
+    contagem_produtos = {p["nome"]: {"qtd": 0, "receita": 0.0} for p in produtos}
+
+    for ped in pedidos:
+        frete_p = float(ped.get("frete") or 0)
+        total_p = float(ped.get("total") or 0)
+        total_frete += frete_p
+        faturamento_doces += max(0.0, total_p - frete_p)
+
+        for parte in (ped.get("itens") or "").split(" | "):
+            m = re.match(r"^(\d+)x\s+(.+?)\s+\(R\$\s*([\d.,]+)\)$", parte)
+            if m:
+                qtd_i = int(m.group(1))
+                nome_i = m.group(2)
+                sub_i = float(m.group(3).replace(",", "."))
+                if nome_i not in contagem_produtos:
+                    contagem_produtos[nome_i] = {"qtd": 0, "receita": 0.0}
+                contagem_produtos[nome_i]["qtd"] += qtd_i
+                contagem_produtos[nome_i]["receita"] += sub_i
+
+    ranking_produtos = sorted(
+        [{"nome": k, "qtd": v["qtd"], "receita": v["receita"]} for k, v in contagem_produtos.items()],
+        key=lambda x: (x["qtd"], x["receita"]),
+        reverse=True
+    )
+
+    mais_vendido = ranking_produtos[0] if ranking_produtos else None
+    menos_vendido = ranking_produtos[-1] if ranking_produtos else None
+    ticket_medio = (faturamento_doces / len(pedidos)) if pedidos else 0.0
+
+    return {
+        "qtd_pedidos": len(pedidos),
+        "faturamento_doces": faturamento_doces,
+        "total_frete": total_frete,
+        "ticket_medio": ticket_medio,
+        "mais_vendido": mais_vendido,
+        "menos_vendido": menos_vendido,
+        "ranking_produtos": ranking_produtos
+    }
+
+# --- FIDELIDADE PROGRESSIVA ---
+def verificar_premio_fidelidade(telefone_formatado: str, valor_pedido: float, config: dict):
+    if not config.get("fidelidade_ativa", True):
+        return None
+    meta_base = float(config.get("meta_valor", 50.0))
+    desconto_pct = float(config.get("fidelidade_desconto", 15))
+    if meta_base <= 0 or desconto_pct <= 0:
+        return None
+
+    res = supabase.table("fidelidade_clientes").select("*").eq("telefone", telefone_formatado).execute()
+    if res.data:
+        saldo_atual = float(res.data[0]["saldo_acumulado"])
+        nivel = int(res.data[0]["nivel"])
+    else:
+        saldo_atual = 0.0
+        nivel = 1
+
+    meta_atual = meta_base * (2 ** (nivel - 1))
+    novo_saldo = saldo_atual + valor_pedido
+
+    if novo_saldo >= meta_atual:
+        ultimos_4 = re.sub(r"\D", "", telefone_formatado)[-4:]
+        sufixo = uuid.uuid4().hex[:3].upper()
+        codigo_gerado = f"VIP-{ultimos_4}-{sufixo}"
+
+        supabase.table("cupons").insert({
+            "codigo": codigo_gerado,
+            "desconto_percent": desconto_pct,
+            "ativo": True,
+            "telefone_dono": telefone_formatado,
+            "uso_unico": True
+        }).execute()
+
+        proximo_nivel = nivel + 1
+        proxima_meta = meta_base * (2 ** (proximo_nivel - 1))
+        supabase.table("fidelidade_clientes").upsert({
+            "telefone": telefone_formatado,
+            "saldo_acumulado": 0.0,
+            "nivel": proximo_nivel
+        }).execute()
+
+        return {
+            "ganhou": True,
+            "codigo": codigo_gerado,
+            "desconto": desconto_pct,
+            "meta_atingida": meta_atual,
+            "proxima_meta": proxima_meta
+        }
+    else:
+        supabase.table("fidelidade_clientes").upsert({
+            "telefone": telefone_formatado,
+            "saldo_acumulado": novo_saldo,
+            "nivel": nivel
+        }).execute()
+        return {"ganhou": False, "saldo_atual": novo_saldo, "meta_atual": meta_atual}
+
+# --- LOGO ---
+def obter_logo_base64():
+    for ext in ["logo.png", "logo.jpg", "logo.jpeg"]:
+        if os.path.exists(ext):
+            with open(ext, "rb") as f:
+                dados = base64.b64encode(f.read()).decode()
+            mime = "image/png" if ext.endswith("png") else "image/jpeg"
+            return f"data:{mime};base64,{dados}"
+    return None
+
+# --- CÁLCULO DE DISTÂNCIA E FRETE ---
+def calcular_distancia_e_rota(lat_cli: float, lon_cli: float):
+    distancia_km = None
+    try:
+        url = f"http://router.project-osrm.org/route/v1/driving/{LON_LOJA},{LAT_LOJA};{lon_cli},{lat_cli}?overview=false"
+        resp = requests.get(url, timeout=4).json()
+        if resp.get("code") == "Ok":
+            metros = resp["routes"][0]["distance"]
+            distancia_km = round(metros / 1000, 2)
+    except Exception:
+        pass
+
+    if distancia_km is None:
+        r = 6371.0
+        dlat = math.radians(lat_cli - LAT_LOJA)
+        dlon = math.radians(lon_cli - LON_LOJA)
+        a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(LAT_LOJA)) * math.cos(math.radians(lat_cli)) * math.sin(dlon / 2) ** 2
+        distancia_km = round(r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)) * 1.25, 2)
+
+    link_rota = f"https://www.google.com/maps/dir/?api=1&origin={LAT_LOJA},{LON_LOJA}&destination={lat_cli},{lon_cli}&travelmode=driving"
+    if distancia_km > DISTANCIA_MAXIMA_KM:
+        return distancia_km, None, link_rota
+
+    valor_frete = TABELA_FRETE[-1][1]
+    for limite_km, preco in TABELA_FRETE:
+        if distancia_km <= limite_km:
+            valor_frete = preco
+            break
+    return distancia_km, valor_frete, link_rota
+
+# --- PIX COPIA E COLA ---
+def gerar_pix_copia_cola(chave: str, nome: str, cidade: str, valor: float, txid: str = "SWEETSBRUNA") -> str:
+    def campo(id_c: str, val: str) -> str:
+        return f"{id_c}{len(val):02d}{val}"
+
+    def crc16(payload: str) -> str:
+        res = 0xFFFF
+        for b in payload.encode("utf-8"):
+            res ^= (b << 8)
+            for _ in range(8):
+                res = ((res << 1) ^ 0x1021) if (res & 0x8000) else (res << 1)
+                res &= 0xFFFF
+        return f"{res:04X}"
+
+    merchant = campo("00", "br.gov.bcb.pix") + campo("01", chave)
+    payload = (
+        campo("00", "01")
+        + campo("26", merchant)
+        + campo("52", "0000")
+        + campo("53", "986")
+        + campo("54", f"{valor:.2f}")
+        + campo("58", "BR")
+        + campo("59", nome[:25].upper())
+        + campo("60", cidade[:15].upper())
+        + campo("62", campo("05", txid[:25]))
+        + "6304"
+    )
+    return payload + crc16(payload)
+
+# --- BANCO & IMAGEM ---
+def listar_produtos():
+    return supabase.table("produtos").select("*").order("estoque", desc=True).order("id", desc=True).execute().data
+
+def buscar_cupom(codigo: str):
+    if not codigo.strip():
+        return None
+    res = supabase.table("cupons").select("*").eq("codigo", codigo.strip().upper()).eq("ativo", True).execute()
+    return res.data[0] if res.data else None
+
+def upload_foto(arquivo):
+    if not arquivo:
+        return None
+    img = Image.open(arquivo).convert("RGB")
+    img.thumbnail((800, 800))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    nome_arq = f"{uuid.uuid4().hex}.jpg"
+    supabase.storage.from_("fotos").upload(nome_arq, buf.getvalue(), {"content-type": "image/jpeg"})
+    return supabase.storage.from_("fotos").get_public_url(nome_arq)
+
+# --- MODAIS ---
+@st.dialog("📦 Quantos você fez hoje?")
+def modal_estoque(produto):
+    if produto.get("imagem_url"):
+        st.image(produto["imagem_url"], use_container_width=True)
+    st.subheader(produto["nome"])
+    st.caption(f"Valor: R$ {float(produto['preco']):.2f}")
+    nova_qtd = st.number_input("Quantidade disponível agora:", min_value=0, value=int(produto["estoque"]), step=1)
+    if st.button("✅ Salvar", type="primary", use_container_width=True):
+        supabase.table("produtos").update({"estoque": nova_qtd}).eq("id", produto["id"]).execute()
+        st.rerun()
+    st.divider()
+    if st.button("🗑️ Apagar este doce do catálogo", use_container_width=True):
+        supabase.table("produtos").delete().eq("id", produto["id"]).execute()
+        st.rerun()
+
+@st.dialog("🧁 Escolher Quantidade")
+def modal_selecionar_doce(produto):
+    if produto.get("imagem_url"):
+        st.image(produto["imagem_url"], use_container_width=True)
+    st.subheader(produto["nome"])
+    st.markdown(f"### R$ {float(produto['preco']):.2f}")
+    st.caption(f"🟢 Disponível agora: {produto['estoque']} unidade(s)")
+    pid = produto["id"]
+    qtd_atual = st.session_state.carrinho.get(pid, 1)
+    qtd = st.number_input("Quantos você quer?", min_value=1, max_value=int(produto["estoque"]), value=min(qtd_atual, int(produto["estoque"])), step=1)
+    if st.button("🛒 Colocar no Carrinho", type="primary", use_container_width=True):
+        st.session_state.carrinho[pid] = qtd
+        st.session_state.pedido_concluido = None
+        st.rerun()
+
+@st.dialog("✏️ Acrescentar Itens na Sacola")
+def modal_editar_pedido_separado(pedido, produtos):
+    num_sacola = f"#{int(pedido.get('numero_dia') or pedido['id']):02d}"
+    st.subheader(f"Sacola {num_sacola} — {pedido['cliente']}")
+    st.info("✅ **Itens já separados dentro da sacola (não serão repetidos):**")
+    for parte in pedido["itens"].split(" | "):
+        st.write(f"• {parte}")
+
+    st.divider()
+    st.markdown("**➕ Selecione o que o cliente pediu para acrescentar:**")
+
+    produtos_disp = [p for p in produtos if int(p["estoque"]) > 0]
+    if not produtos_disp:
+        st.warning("Não há outros produtos com estoque disponível no momento.")
+        return
+
+    acrescimos = []
+    valor_extra = 0.0
+
+    for prod in produtos_disp:
+        c1, c2 = st.columns([2.5, 1])
+        with c1:
+            st.write(f"**{prod['nome']}** (R$ {float(prod['preco']):.2f})")
+            st.caption(f"Estoque: {prod['estoque']} un.")
+        with c2:
+            qtd_add = st.number_input(
+                "Qtd",
+                min_value=0,
+                max_value=int(prod["estoque"]),
+                value=0,
+                step=1,
+                key=f"edit_add_{pedido['id']}_{prod['id']}",
+                label_visibility="collapsed"
+            )
+            if qtd_add > 0:
+                sub = qtd_add * float(prod["preco"])
+                valor_extra += sub
+                acrescimos.append((prod, qtd_add, sub))
+
+    if acrescimos:
+        st.success(f"Valor do acréscimo: **+R$ {valor_extra:.2f}** (Novo total: **R$ {float(pedido['total']) + valor_extra:.2f}**)")
+
+    if st.button("🔄 Voltar para 'A Separar' só com o Acréscimo", type="primary", use_container_width=True):
+        if not acrescimos:
+            st.warning("Escolha a quantidade de pelo menos 1 item para acrescentar.")
+        else:
+            novos_trechos = []
+            for prod, qtd_add, sub in acrescimos:
+                novo_est = int(prod["estoque"]) - qtd_add
+                supabase.table("produtos").update({"estoque": novo_est}).eq("id", prod["id"]).execute()
+                novos_trechos.append(f"{qtd_add}x {prod['nome']} (R$ {sub:.2f})")
+
+            str_acrescimo = " | ".join(novos_trechos)
+            itens_completos = f"{pedido['itens']} | {str_acrescimo}"
+            novo_total = float(pedido["total"]) + valor_extra
+
+            supabase.table("pedidos").update({
+                "itens": itens_completos,
+                "itens_acrescentados": str_acrescimo,
+                "total": novo_total,
+                "status": "separando"
+            }).eq("id", pedido["id"]).execute()
+
+            st.toast(f"Sacola {num_sacola} voltou para separar apenas os itens acrescentados!")
+            st.rerun()
+
+# --- ESTADO DA SESSÃO ---
+if "carrinho" not in st.session_state:
+    st.session_state.carrinho = {}
+if "pedido_concluido" not in st.session_state:
+    st.session_state.pedido_concluido = None
+if "buscar_gps" not in st.session_state:
+    st.session_state.buscar_gps = False
+if "dados_entrega" not in st.session_state:
+    st.session_state.dados_entrega = None
+if "cupom_aplicado" not in st.session_state:
+    st.session_state.cupom_aplicado = None
+
+config_loja = obter_config_loja()
+aberta = bool(config_loja.get("aberta", True))
+
+# --- CONTROLE DE ACESSO INVISÍVEL PARA O CLIENTE ---
+eh_admin = st.query_params.get("admin") == "1"
+
+# --- CABEÇALHO ---
+logo_b64 = obter_logo_base64()
+if logo_b64:
+    st.markdown(
+        f"""
+        <div style='text-align: center; padding: 10px 0 8px 0;'>
+            <img src='{logo_b64}' style='width: 120px; height: 120px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 12px rgba(0,0,0,0.12); margin-bottom: 8px;' />
+            <h1 style='margin: 0; font-size: 28px;'>{NOME_EMPRESA}</h1>
+            <p style='color: gray; font-size: 13px; margin-top: 4px;'>CNPJ: {CNPJ_EMPRESA} • Pronta Entrega</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    if eh_admin:
+        st.sidebar.markdown(
+            f"<div style='text-align:center;'><img src='{logo_b64}' style='width:80px; height:80px; border-radius:50%; object-fit:cover;'/></div>",
+            unsafe_allow_html=True
+        )
+else:
+    st.markdown(
+        f"""
+        <div style='text-align: center; padding: 10px 0 5px 0;'>
+            <h1 style='margin-bottom: 0;'>🧁 {NOME_EMPRESA}</h1>
+            <p style='color: gray; font-size: 14px; margin-top: 4px;'>CNPJ: {CNPJ_EMPRESA} • Pronta Entrega</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+if not eh_admin:
+    st.markdown("<style>[data-testid='stSidebar'] {display: none;}</style>", unsafe_allow_html=True)
+    modo = "🧁 Vitrine do Cliente"
+else:
+    modo = st.sidebar.radio(f"{NOME_EMPRESA}", ["🔐 Área da Confeiteira", "🧁 Vitrine do Cliente"])
+    st.sidebar.caption(f"CNPJ: {CNPJ_EMPRESA}")
+
+# ==========================================
+# TELA 1: VITRINE DO CLIENTE
+# ==========================================
+if modo == "🧁 Vitrine do Cliente":
+    if not aberta:
+        st.error("🔴 **LOJA FECHADA NO MOMENTO** — No momento não estamos aceitando pedidos. Volte em breve!")
+    else:
+        st.success("🟢 **LOJA ABERTA** — Escolha seus doces abaixo e finalize com Pix!")
+        if config_loja.get("fidelidade_ativa"):
+            st.info(f"🎁 **Fidelidade:** Acumule **R$ {float(config_loja.get('meta_valor', 50)):.2f}** em pedidos e ganhe um cupom automático de **{int(config_loja.get('fidelidade_desconto', 15))}% OFF**!")
+
+    produtos = listar_produtos()
+    mapa_prod = {p["id"]: p for p in produtos}
+
+    for pid in list(st.session_state.carrinho.keys()):
+        if pid not in mapa_prod or mapa_prod[pid]["estoque"] <= 0:
+            del st.session_state.carrinho[pid]
+        elif st.session_state.carrinho[pid] > mapa_prod[pid]["estoque"]:
+            st.session_state.carrinho[pid] = mapa_prod[pid]["estoque"]
+
+    total_itens = sum(st.session_state.carrinho.values())
+    aba_loja, aba_carrinho = st.tabs(["🍰 Escolher Doces", f"🛒 Carrinho ({total_itens})"])
+
+    with aba_loja:
+        if not produtos:
+            st.info("Vitrine em preparação! Volte em instantes.")
+        else:
+            cols = st.columns(2)
+            for idx, prod in enumerate(produtos):
+                pid = prod["id"]
+                estoque = prod["estoque"]
+                with cols[idx % 2]:
+                    with st.container(border=True):
+                        if prod.get("imagem_url"):
+                            st.image(prod["imagem_url"], use_container_width=True)
+                        st.markdown(f"**{prod['nome']}**")
+                        st.markdown(f"### R$ {float(prod['preco']):.2f}")
+                        if estoque <= 0:
+                            st.error("🔴 INDISPONÍVEL")
+                        else:
+                            st.caption(f"🟢 {estoque} disponíveis")
+                            no_carrinho = st.session_state.carrinho.get(pid, 0)
+                            texto_btn = "🔒 Loja Fechada" if not aberta else (f"🛒 No carrinho ({no_carrinho})" if no_carrinho > 0 else "👆 Selecionar")
+                            if st.button(texto_btn, key=f"sel_{pid}", disabled=(not aberta), use_container_width=True):
+                                modal_selecionar_doce(prod)
+
+            if aberta and total_itens > 0:
+                st.success(f"Você tem **{total_itens} doce(s)** no carrinho! Toque na aba **🛒 Carrinho ({total_itens})** acima para pagar.")
+
+    with aba_carrinho:
+        if not aberta:
+            st.warning("🔴 A loja fechou agora e não é possível finalizar novos pedidos no momento.")
+        elif st.session_state.pedido_concluido:
+            dados = st.session_state.pedido_concluido
+            st.success("🎉 Pedido reservado com sucesso!")
+
+            st.markdown(
+                f"""
+                <div style='background:#fff1f5; border:2px dashed #e11d48; border-radius:16px; padding:16px; text-align:center; margin-bottom:16px;'>
+                    <p style='margin:0; font-size:12px; font-weight:bold; color:#be123c; text-transform:uppercase;'>Número do seu Pedido</p>
+                    <h1 style='margin:4px 0; font-size:48px; color:#be123c;'>#{dados['numero_dia']:02d}</h1>
+                    <p style='margin:0; font-size:12px; color:#881337;'>Informe este número na retirada ou entrega</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            if dados.get("premio_fidelidade") and dados["premio_fidelidade"].get("ganhou"):
+                premio = dados["premio_fidelidade"]
+                st.balloons()
+                with st.container(border=True):
+                    st.markdown(f"### 🏆 PARABÉNS! VOCÊ GANHOU {int(premio['desconto'])}% OFF!")
+                    st.write(f"Você atingiu a meta de R$ {premio['meta_atingida']:.2f}! Use este cupom na próxima compra (próxima meta: R$ {premio['proxima_meta']:.2f}):")
+                    st.code(premio["codigo"], language=None)
+
+            st.markdown(f"### Total a Pagar: R$ {dados['total']:.2f}")
+            st.caption(f"Favorecido: **{NOME_EMPRESA}** • CNPJ: **{CNPJ_EMPRESA}**")
+            st.code(dados["pix_code"], language=None)
+            st.link_button("📲 Enviar Pedido e Comprovante no WhatsApp", dados["link_wa"], type="primary", use_container_width=True)
+
+            if st.button("Fazer novo pedido"):
+                st.session_state.pedido_concluido = None
+                st.session_state.dados_entrega = None
+                st.session_state.buscar_gps = False
+                st.session_state.cupom_aplicado = None
+                st.rerun()
+
+        elif not st.session_state.carrinho:
+            st.info("Seu carrinho está vazio.")
+        else:
+            subtotal_doces = 0.0
+            itens_lista = []
+            for pid, qtd in list(st.session_state.carrinho.items()):
+                p = mapa_prod[pid]
+                sub = float(p["preco"]) * qtd
+                subtotal_doces += sub
+                itens_lista.append((pid, p["nome"], qtd, sub))
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.write(f"**{qtd}x** {p['nome']} — R$ {sub:.2f}")
+                with c2:
+                    if st.button("Remover", key=f"rm_{pid}"):
+                        del st.session_state.carrinho[pid]
+                        st.rerun()
+
+            st.divider()
+            c_cup1, c_cup2 = st.columns([2.5, 1])
+            with c_cup1:
+                codigo_digitado = st.text_input("Cupom de Desconto", placeholder="Ex: BRUNA10 ou VIP-...", label_visibility="collapsed")
+            with c_cup2:
+                if st.button("Aplicar", use_container_width=True):
+                    cup = buscar_cupom(codigo_digitado)
+                    if cup:
+                        st.session_state.cupom_aplicado = cup
+                        st.rerun()
+                    else:
+                        st.session_state.cupom_aplicado = None
+                        st.error("Cupom inválido ou já utilizado.")
+
+            valor_desconto = 0.0
+            codigo_cupom_str = ""
+            if st.session_state.cupom_aplicado:
+                cup = st.session_state.cupom_aplicado
+                pct = float(cup["desconto_percent"])
+                valor_desconto = round(subtotal_doces * (pct / 100.0), 2)
+                codigo_cupom_str = cup["codigo"]
+                col_ci, col_cr = st.columns([3, 1])
+                with col_ci:
+                    st.success(f"Cupom **{codigo_cupom_str}** aplicado (-R$ {valor_desconto:.2f})")
+                with col_cr:
+                    if st.button("Tirar"):
+                        st.session_state.cupom_aplicado = None
+                        st.rerun()
+
+            st.divider()
+            entrega = st.radio("Como deseja receber?", ["Retirar no local", "Entrega (Delivery)"], horizontal=True)
+
+            valor_frete = 0.0
+            distancia_km = 0.0
+            link_rota_entregador = ""
+            endereco_texto = ""
+
+            if entrega == "Entrega (Delivery)":
+                if st.button("📍 Calcular Frete com Minha Localização", use_container_width=True):
+                    st.session_state.buscar_gps = True
+                if st.session_state.buscar_gps:
+                    loc = get_geolocation()
+                    if loc and "coords" in loc:
+                        km, frete_calc, rota_url = calcular_distancia_e_rota(loc["coords"]["latitude"], loc["coords"]["longitude"])
+                        st.session_state.dados_entrega = {"km": km, "frete": frete_calc, "rota": rota_url}
+                        st.session_state.buscar_gps = False
+                        st.rerun()
+                if st.session_state.dados_entrega:
+                    info_ent = st.session_state.dados_entrega
+                    distancia_km = info_ent["km"]
+                    link_rota_entregador = info_ent["rota"]
+                    if info_ent["frete"] is None:
+                        st.error(f"Distância ({distancia_km} km) fora do raio máximo ({DISTANCIA_MAXIMA_KM} km).")
+                    else:
+                        valor_frete = info_ent["frete"]
+                        st.success(f"🛵 Distância: **{distancia_km} km** • Entrega: **R$ {valor_frete:.2f}**")
+                endereco_texto = st.text_input("Rua, Número, Bairro e Complemento *")
+
+            total_geral = max(0.0, subtotal_doces - valor_desconto + valor_frete)
+            st.markdown(f"## Total Final: R$ {total_geral:.2f}")
+
+            nome_cli = st.text_input("Seu Nome *")
+            tel_raw = st.text_input("WhatsApp / Telefone *", placeholder="669.999-9999", max_chars=14)
+            tel_formatado, tel_valido = formatar_telefone(tel_raw)
+            if tel_raw:
+                st.caption(f"📱 Contato formatado: **{tel_formatado}**" if tel_valido else "⚠️ Digite DDD + número (ex: 6699999999 -> **669.999-9999**)")
+
+            if st.button("✅ Confirmar Pedido e Gerar Pix", type="primary", use_container_width=True):
+                if not bool(obter_config_loja().get("aberta", True)):
+                    st.error("🔴 A loja fechou.")
+                elif not nome_cli.strip() or not tel_valido:
+                    st.warning("Preencha seu nome e telefone no padrão 669.999-9999.")
+                elif entrega == "Entrega (Delivery)" and (not st.session_state.dados_entrega or st.session_state.dados_entrega["frete"] is None or not endereco_texto.strip()):
+                    st.warning("Calcule o frete pela localização e preencha o endereço.")
+                else:
+                    prod_atualizados = {p["id"]: p for p in listar_produtos()}
+                    erro = next((f"'{n}' agora só tem {prod_atualizados[pid]['estoque']} un." for pid, n, q, _ in itens_lista if prod_atualizados[pid]["estoque"] < q), None)
+                    if erro:
+                        st.error(erro)
+                    else:
+                        resumo_txt = []
+                        for pid, nome_p, qtd, sub in itens_lista:
+                            supabase.table("produtos").update({"estoque": prod_atualizados[pid]["estoque"] - qtd}).eq("id", pid).execute()
+                            resumo_txt.append(f"{qtd}x {nome_p} (R$ {sub:.2f})")
+
+                        num_dia = gerar_proximo_numero_dia()
+                        itens_str = " | ".join(resumo_txt)
+                        supabase.table("pedidos").insert({
+                            "numero_dia": num_dia,
+                            "status": "pendente",
+                            "cliente": nome_cli.strip(),
+                            "telefone": tel_formatado,
+                            "itens": itens_str,
+                            "itens_acrescentados": "",
+                            "cupom": codigo_cupom_str,
+                            "desconto": valor_desconto,
+                            "total": total_geral,
+                            "entrega": entrega,
+                            "endereco": endereco_texto,
+                            "frete": valor_frete,
+                            "distancia_km": distancia_km,
+                            "rota_maps": link_rota_entregador
+                        }).execute()
+
+                        if st.session_state.cupom_aplicado and st.session_state.cupom_aplicado.get("uso_unico"):
+                            supabase.table("cupons").update({"ativo": False}).eq("id", st.session_state.cupom_aplicado["id"]).execute()
+
+                        premio = verificar_premio_fidelidade(tel_formatado, max(0.0, subtotal_doces - valor_desconto), config_loja)
+                        pix_code = gerar_pix_copia_cola(CHAVE_PIX, NOME_RECEBEDOR, CIDADE_RECEBEDOR, total_geral, f"PED{num_dia:02d}")
+
+                        msg = [
+                            f"*{NOME_EMPRESA.upper()}* 🧁",
+                            f"_CNPJ: {CNPJ_EMPRESA}_",
+                            f"*PEDIDO #{num_dia:02d}*",
+                            f"*Cliente:* {nome_cli.strip()} ({tel_formatado})",
+                            "",
+                            "*Itens:*",
+                        ] + [f"• {l}" for l in resumo_txt] + [
+                            "",
+                            f"*Total Geral:* R$ {total_geral:.2f}",
+                            f"*Recebimento:* {entrega}",
+                        ]
+                        if endereco_texto:
+                            msg.append(f"*Endereço:* {endereco_texto}")
+                        if link_rota_entregador:
+                            msg.append(f"*🛵 Rota p/ Entregador:* {link_rota_entregador}")
+                        if premio and premio.get("ganhou"):
+                            msg.append(f"\n🎁 *Ganhei o cupom fidelidade:* {premio['codigo']} ({int(premio['desconto'])}% OFF)")
+                        msg.append("*Pagamento:* Pix (enviando comprovante)")
+
+                        link_wa = f"https://wa.me/{WHATSAPP_LOJA}?text={urllib.parse.quote(chr(10).join(msg))}"
+
+                        st.session_state.carrinho = {}
+                        st.session_state.cupom_aplicado = None
+                        st.session_state.pedido_concluido = {
+                            "numero_dia": num_dia,
+                            "total": total_geral,
+                            "pix_code": pix_code,
+                            "link_wa": link_wa,
+                            "premio_fidelidade": premio
+                        }
+                        st.rerun()
+
+# ==========================================
+# TELA 2: ÁREA DA CONFEITEIRA
+# ==========================================
+elif modo == "🔐 Área da Confeiteira":
+    st.subheader("🔐 Bancada da Confeiteira")
+    senha = st.text_input("Senha", type="password")
+
+    if senha == SENHA_ADMIN:
+        with st.container(border=True):
+            c_st, c_b1, c_b2 = st.columns([1.8, 1.1, 1.3])
+            with c_st:
+                if aberta:
+                    st.markdown("### 🟢 Loja Aberta")
+                    st.caption(f"Senha atual do dia: **#{int(config_loja.get('ultimo_numero_dia', 0)):02d}**")
+                else:
+                    st.markdown("### 🔴 Loja Fechada")
+                    st.caption("Pedidos bloqueados.")
+            with c_b1:
+                st.write("")
+                if aberta:
+                    if st.button("🔴 Fechar", use_container_width=True):
+                        config_loja["aberta"] = False
+                        salvar_config_loja(config_loja)
+                        st.rerun()
+                else:
+                    if st.button("🟢 Abrir", type="primary", use_container_width=True):
+                        config_loja["aberta"] = True
+                        salvar_config_loja(config_loja)
+                        st.rerun()
+            with c_b2:
+                st.write("")
+                if st.button("🧹 Novo Dia (#01)", help="Zera estoque sobrando e reinicia contagem no #01", use_container_width=True):
+                    supabase.table("produtos").update({"estoque": 0}).neq("id", 0).execute()
+                    config_loja["ultimo_numero_dia"] = 0
+                    config_loja["inicio_dia"] = datetime.now().isoformat()
+                    salvar_config_loja(config_loja)
+                    st.toast("Estoque zerado e numeração reiniciada para #01!")
+                    st.rerun()
+
+        produtos_atual = listar_produtos()
+        resumo = obter_resumo_financeiro_dia(produtos_atual, config_loja)
+
+        with st.container(border=True):
+            st.markdown("### 📊 Resumo Financeiro de Hoje")
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("🧁 Produzido Hoje", f"R$ {resumo['produzido_rs']:.2f}", delta=f"{resumo['produzido_un']} un.", delta_color="off")
+            with m2:
+                st.metric("✅ Já Vendido", f"R$ {resumo['vendido_rs']:.2f}", delta=f"{resumo['vendido_un']} un. ({resumo['percentual']:.0f}%)")
+            with m3:
+                st.metric("📦 Falta Vender", f"R$ {resumo['falta_rs']:.2f}", delta=f"{resumo['falta_un']} un.", delta_color="off")
+            st.progress(min(1.0, resumo["percentual"] / 100.0))
+
+        aba_fila, aba_separados, aba_estoque, aba_novo, aba_cupons, aba_ranking, aba_relatorios, aba_excel = st.tabs([
+            "📦 A Separar",
+            "✅ Separados",
+            "📸 Produção",
+            "➕ Novo",
+            "🎟️ Cupons",
+            "🏆 Top 5",
+            "📈 Relatórios",
+            "📊 Excel"
+        ])
+
+        # --- ABA 1: SACOLAS A SEPARAR ---
+        with aba_fila:
+            pedidos_ativos = supabase.table("pedidos").select("*").neq("status", "concluido").order("id", desc=False).execute().data
+
+            if not pedidos_ativos:
+                st.success("🎉 Tudo separado! Nenhuma sacola pendente agora.")
+            else:
+                resumo_geladeira = {}
+                for ped in pedidos_ativos:
+                    texto_alvo = ped.get("itens_acrescentados") if ped.get("itens_acrescentados") else ped["itens"]
+                    for parte in texto_alvo.split(" | "):
+                        m = re.match(r"^(\d+)x\s+(.+?)\s+\(R\$", parte)
+                        if m:
+                            qtd_i = int(m.group(1))
+                            nome_i = m.group(2)
+                            resumo_geladeira[nome_i] = resumo_geladeira.get(nome_i, 0) + qtd_i
+
+                with st.container(border=True):
+                    st.markdown("**🧊 Resumo: Pegar da geladeira agora**")
+                    st.write("  •  ".join([f"**{q}x** {n}" for n, q in resumo_geladeira.items()]))
+
+                st.divider()
+
+                for ped in pedidos_ativos:
+                    num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
+                    status_atual = ped.get("status", "pendente")
+                    tem_acrescimo = bool(ped.get("itens_acrescentados"))
+                    tel_limpo = re.sub(r"\D", "", ped.get("telefone", ""))
+                    tel_wa = f"55{tel_limpo}" if len(tel_limpo) in (10, 11) else ""
+
+                    with st.container(border=True):
+                        top_c1, top_c2 = st.columns([2.5, 1.2])
+                        with top_c1:
+                            st.markdown(f"## 🛍️ Sacola {num_sacola} — {ped['cliente']}")
+                            if tem_acrescimo:
+                                st.warning(f"⚠️ **ACRÉSCIMO NA SACOLA {num_sacola}** — Colocar apenas os itens abaixo:")
+                            else:
+                                st.caption(f"✍️ **Escreva {num_sacola} na sacola** • 📱 {ped.get('telefone', '')}")
+                        with top_c2:
+                            if status_atual == "pendente":
+                                st.warning("🟡 Aguardando Pix")
+                            else:
+                                st.info("🔵 Separando")
+
+                        itens_para_conferir = ped["itens_acrescentados"] if tem_acrescimo else ped["itens"]
+                        st.markdown("**Marque conforme colocar na sacola:**")
+                        for idx_i, parte in enumerate(itens_para_conferir.split(" | ")):
+                            limpo = re.sub(r"\s+\(R\$.*?\)$", "", parte)
+                            st.checkbox(limpo, key=f"chk_{ped['id']}_{idx_i}_{len(itens_para_conferir)}")
+
+                        st.write(f"**Total da Sacola:** R$ {float(ped['total']):.2f} • **{ped['entrega']}**")
+                        if ped.get("endereco"):
+                            st.caption(f"📍 {ped['endereco']}")
+
+                        b1, b2, b3 = st.columns(3)
+                        with b1:
+                            if status_atual == "pendente":
+                                if st.button("✅ Confirmar Pix", key=f"pix_{ped['id']}", use_container_width=True):
+                                    supabase.table("pedidos").update({"status": "separando"}).eq("id", ped["id"]).execute()
+                                    st.rerun()
+                            elif tel_wa:
+                                msg_pix = urllib.parse.quote(
+                                    f"Oi {ped['cliente']}! 🧁 Recebemos o Pix do seu *Pedido {num_sacola}* aqui na *{NOME_EMPRESA}*. Já estou separando seus doces!"
+                                )
+                                st.link_button("📲 Avisar Pix OK", f"https://wa.me/{tel_wa}?text={msg_pix}", use_container_width=True)
+
+                        with b2:
+                            if tel_wa:
+                                if ped["entrega"] == "Entrega (Delivery)":
+                                    msg_saiu = urllib.parse.quote(
+                                        f"Oi {ped['cliente']}! 🛵💨 Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* acabou de sair para entrega!"
+                                    )
+                                    st.link_button("🛵 Avisar Saiu", f"https://wa.me/{tel_wa}?text={msg_saiu}", use_container_width=True)
+                                else:
+                                    msg_pronto = urllib.parse.quote(
+                                        f"Oi {ped['cliente']}! 🛍️✨ Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* já está prontinho te esperando para retirada!"
+                                    )
+                                    st.link_button("🛍️ Avisar Pronto", f"https://wa.me/{tel_wa}?text={msg_pronto}", use_container_width=True)
+
+                        with b3:
+                            if st.button("✔️ Concluir Sacola", key=f"done_{ped['id']}", type="primary", use_container_width=True):
+                                supabase.table("pedidos").update({
+                                    "status": "concluido",
+                                    "itens_acrescentados": ""
+                                }).eq("id", ped["id"]).execute()
+                                st.toast(f"Sacola {num_sacola} movida para 'Pedidos Separados'!")
+                                st.rerun()
+
+                        if ped["entrega"] == "Entrega (Delivery)" and ped.get("rota_maps"):
+                            msg_motoboy = urllib.parse.quote(
+                                f"🛵 *Entrega {NOME_EMPRESA} — Sacola {num_sacola}*\n*Cliente:* {ped['cliente']} ({ped.get('telefone', '')})\n*Endereço:* {ped.get('endereco', '')}\n*Rota:* {ped['rota_maps']}"
+                            )
+                            st.link_button(f"🗺️ Mandar Rota da Sacola {num_sacola} p/ Entregador", f"https://wa.me/?text={msg_motoboy}", use_container_width=True)
+
+        # --- ABA 2: PEDIDOS SEPARADOS ---
+        with aba_separados:
+            st.markdown("### ✅ Pedidos Já Separados")
+            st.caption("Precisa acrescentar mais algum doce em uma sacola já separada? Clique em **Editar / Acrescentar**:")
+
+            pedidos_concluidos = supabase.table("pedidos").select("*").eq("status", "concluido").order("id", desc=True).limit(40).execute().data
+            if not pedidos_concluidos:
+                st.info("Nenhuma sacola concluída ainda.")
+            else:
+                for ped in pedidos_concluidos:
+                    num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
+                    with st.container(border=True):
+                        c_s1, c_s2 = st.columns([2.4, 1.3])
+                        with c_s1:
+                            st.markdown(f"**🟢 Sacola {num_sacola} — {ped['cliente']}** ({ped.get('telefone', '')})")
+                            st.write(ped["itens"])
+                            st.caption(f"Total: **R$ {float(ped['total']):.2f}** • {ped['entrega']}")
+                        with c_s2:
+                            st.write("")
+                            if st.button("✏️ Editar / Acrescentar", key=f"edit_sep_{ped['id']}", use_container_width=True):
+                                modal_editar_pedido_separado(ped, produtos_atual)
+
+        # --- ABA 3: PRODUÇÃO DO DIA ---
+        with aba_estoque:
+            st.caption("Toque no doce para informar quantos você fez hoje:")
+            if not produtos_atual:
+                st.info("Você ainda não cadastrou nenhum doce. Vá na aba **➕ Novo** ao lado!")
+            else:
+                cols = st.columns(2)
+                for idx, prod in enumerate(produtos_atual):
+                    with cols[idx % 2]:
+                        with st.container(border=True):
+                            if prod.get("imagem_url"):
+                                st.image(prod["imagem_url"], use_container_width=True)
+                            st.markdown(f"**{prod['nome']}**")
+                            st.caption(f"R$ {float(prod['preco']):.2f}")
+                            est = prod["estoque"]
+                            st.success(f"Disponível: {est}") if est > 0 else st.error("Esgotado (0)")
+                            if st.button("✏️ Informar Qtd", key=f"adm_{prod['id']}", use_container_width=True):
+                                modal_estoque(prod)
+
+        # --- ABA 4: NOVO DOCE ---
+        with aba_novo:
+            with st.form("novo_doce", clear_on_submit=True):
+                foto_p = st.file_uploader("1. Escolha a foto do doce", type=["jpg", "jpeg", "png"])
+                nome_p = st.text_input("2. Nome do doce")
+                preco_p = st.number_input("3. Valor (R$)", min_value=0.0, step=0.50)
+                if st.form_submit_button("✅ Salvar Doce", type="primary", use_container_width=True):
+                    if not nome_p.strip() or preco_p <= 0:
+                        st.warning("Coloque o nome e o valor do doce.")
+                    else:
+                        url_img = upload_foto(foto_p)
+                        supabase.table("produtos").insert({"nome": nome_p.strip(), "preco": preco_p, "estoque": 0, "imagem_url": url_img}).execute()
+                        st.success(f"'{nome_p}' salvo! Agora clique nele na aba **📸 Produção** para colocar a quantidade.")
+                        st.rerun()
+
+        # --- ABA 5: CUPONS & FIDELIDADE ---
+        with aba_cupons:
+            with st.container(border=True):
+                st.markdown("### 🎁 Cupom Automático por Meta Progressiva")
+                with st.form("form_fidelidade"):
+                    fid_ativa = st.checkbox("Ativar recompensa automática", value=bool(config_loja.get("fidelidade_ativa", True)))
+                    c_m1, c_m2 = st.columns(2)
+                    with c_m1:
+                        meta_val = st.number_input("Meta inicial (R$)", min_value=5.0, value=float(config_loja.get("meta_valor", 50.0)), step=5.0)
+                    with c_m2:
+                        desc_fid = st.number_input("Desconto ganho (%)", min_value=1, max_value=100, value=int(config_loja.get("fidelidade_desconto", 15)), step=1)
+                    if st.form_submit_button("💾 Salvar Regra", type="primary", use_container_width=True):
+                        config_loja["fidelidade_ativa"] = fid_ativa
+                        config_loja["meta_valor"] = meta_val
+                        config_loja["fidelidade_desconto"] = desc_fid
+                        salvar_config_loja(config_loja)
+                        st.success("Regra salva!")
+                        st.rerun()
+
+            st.divider()
+            with st.form("novo_cupom", clear_on_submit=True):
+                c1, c2 = st.columns([2, 1])
+                with c1:
+                    cod_cupom = st.text_input("Novo Cupom Manual (ex: BRUNA10)")
+                with c2:
+                    pct_cupom = st.number_input("Desconto (%)", min_value=1, max_value=100, value=10, step=1)
+                if st.form_submit_button("🎟️ Criar Cupom", use_container_width=True):
+                    if cod_cupom.strip():
+                        supabase.table("cupons").upsert({"codigo": cod_cupom.strip().upper(), "desconto_percent": pct_cupom, "ativo": True, "uso_unico": False}, on_conflict="codigo").execute()
+                        st.rerun()
+
+            for cup in supabase.table("cupons").select("*").eq("ativo", True).order("id", desc=True).execute().data:
+                ca, cb = st.columns([3, 1])
+                with ca:
+                    dono = f" • Cliente: {cup['telefone_dono']}" if cup.get("telefone_dono") else " • Geral"
+                    st.write(f"🎟️ **{cup['codigo']}** ({int(cup['desconto_percent'])}% OFF){dono}")
+                with cb:
+                    if st.button("🗑️", key=f"dc_{cup['id']}"):
+                        supabase.table("cupons").delete().eq("id", cup["id"]).execute()
+                        st.rerun()
+
+        # --- ABA 6: TOP 5 CLIENTES ---
+        with aba_ranking:
+            st.markdown("### 🏆 Top 5 Clientes com Mais Pedidos")
+            todos = supabase.table("pedidos").select("cliente, telefone, total").execute().data
+            if not todos:
+                st.info("Ainda não há pedidos registrados.")
+            else:
+                ranking_map = {}
+                for ped in todos:
+                    tel = (ped.get("telefone") or "").strip()
+                    if not tel:
+                        continue
+                    if tel not in ranking_map:
+                        ranking_map[tel] = {"telefone": tel, "cliente": ped.get("cliente", ""), "qtd": 0, "total": 0.0}
+                    ranking_map[tel]["qtd"] += 1
+                    ranking_map[tel]["total"] += float(ped.get("total", 0))
+                    ranking_map[tel]["cliente"] = ped.get("cliente", ranking_map[tel]["cliente"])
+
+                top5 = sorted(ranking_map.values(), key=lambda x: (x["qtd"], x["total"]), reverse=True)[:5]
+                medalhas = ["🥇 1º", "🥈 2º", "🥉 3º", "4º", "5º"]
+                for i, item in enumerate(top5):
+                    with st.container(border=True):
+                        ci, ca = st.columns([2.3, 1.2])
+                        with ci:
+                            st.markdown(f"**{medalhas[i]} — {item['cliente']}** ({item['telefone']})")
+                            st.caption(f"🛍️ **{item['qtd']} pedido(s)** • Total acumulado: **R$ {item['total']:.2f}**")
+                        with ca:
+                            tel_limpo = re.sub(r"\D", "", item["telefone"])
+                            if len(tel_limpo) in (10, 11):
+                                msg_brinde = urllib.parse.quote(
+                                    f"Olá {item['cliente']}! 🧁🎉 Aqui é da *{NOME_EMPRESA}*!\nVocê está no nosso *Top 5 clientes com mais pedidos* ({item['qtd']} pedidos) e ganhou um *brinde especial* no seu próximo pedido! 🎁✨"
+                                )
+                                st.link_button("🎁 Mandar Brinde", f"https://wa.me/55{tel_limpo}?text={msg_brinde}", use_container_width=True)
+
+        # --- ABA 7: RELATÓRIOS ---
+        with aba_relatorios:
+            st.markdown("### 📈 Desempenho & Acumulado")
+            filtro_periodo = st.radio("Selecione o período:", ["Hoje", "Este Mês", "Este Ano", "Todo o Período"], horizontal=True)
+            rel = gerar_relatorio_periodo(filtro_periodo, produtos_atual)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("💰 Vendido (Doces)", f"R$ {rel['faturamento_doces']:.2f}")
+            with c2:
+                st.metric("🛍️ Pedidos Feitos", f"{rel['qtd_pedidos']}")
+            with c3:
+                st.metric("🧾 Ticket Médio", f"R$ {rel['ticket_medio']:.2f}")
+
+            st.caption(f"🛵 Total repassado em entregas no período: R$ {rel['total_frete']:.2f}")
+            st.divider()
+
+            if rel["mais_vendido"] and rel["menos_vendido"]:
+                col_mv, col_lv = st.columns(2)
+                with col_mv:
+                    with st.container(border=True):
+                        st.markdown("#### 🔥 Mais Vendido")
+                        st.subheader(rel["mais_vendido"]["nome"])
+                        st.success(f"**{rel['mais_vendido']['qtd']} un.** vendidas (R$ {rel['mais_vendido']['receita']:.2f})")
+                with col_lv:
+                    with st.container(border=True):
+                        st.markdown("#### 📉 Menos Vendido")
+                        st.subheader(rel["menos_vendido"]["nome"])
+                        st.warning(f"**{rel['menos_vendido']['qtd']} un.** vendidas (R$ {rel['menos_vendido']['receita']:.2f})")
+
+                st.markdown("#### 📋 Ranking Completo de Produtos")
+                for idx_p, item_p in enumerate(rel["ranking_produtos"], start=1):
+                    st.write(f"**{idx_p}º.** {item_p['nome']} — **{item_p['qtd']} un.** (R$ {item_p['receita']:.2f})")
+
+        # --- ABA 8: EXCEL ---
+        with aba_excel:
+            pedidos = supabase.table("pedidos").select("*").order("id", desc=True).execute().data
+            if not pedidos:
+                st.info("Nenhum pedido registrado ainda.")
+            else:
+                df = pd.DataFrame(pedidos)
+                df["criado_em"] = pd.to_datetime(df["criado_em"]).dt.strftime("%d/%m/%Y %H:%M")
+                cols_exp = ["numero_dia", "criado_em", "cliente", "telefone", "itens", "cupom", "desconto", "frete", "total", "entrega", "endereco", "rota_maps"]
+                for col in cols_exp:
+                    if col not in df.columns:
+                        df[col] = ""
+                df_export = df[cols_exp]
+                df_export.columns = ["Sacola #", "Data/Hora", "Cliente", "Contato", "Itens", "Cupom", "Desconto (R$)", "Frete (R$)", "Total (R$)", "Recebimento", "Endereço", "Rota"]
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    pd.DataFrame([[f"{NOME_EMPRESA} — CNPJ: {CNPJ_EMPRESA}"]]).to_excel(writer, index=False, header=False, sheet_name="Pedidos", startrow=0)
+                    df_export.to_excel(writer, index=False, sheet_name="Pedidos", startrow=2)
+                st.download_button(
+                    label="📥 Gerar Excel (.xlsx)",
+                    data=buf.getvalue(),
+                    file_name=f"sweets_da_bruna_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True
+                )
+    elif senha:
+        st.error("Senha incorreta.")
+
+# --- RODAPÉ OFICIAL ---
+st.divider()
+st.markdown(
+    f"<div style='text-align: center; color: gray; font-size: 12px;'>{NOME_EMPRESA} • CNPJ: {CNPJ_EMPRESA}</div>",
+    unsafe_allow_html=True
+)
