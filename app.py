@@ -25,6 +25,158 @@ st.set_page_config(
     layout="centered"
 )
 
+# --- VISUAL CLEAN APP (OPÇÃO B - DESIGN MODERNO & TECNOLÓGICO) ---
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+    /* Tipografia e fundo global */
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', sans-serif !important;
+    }
+
+    .stApp {
+        background: linear-gradient(180deg, #FFF1F5 0%, #F8FAFC 240px, #F8FAFC 100%);
+    }
+
+    /* Limpar menus e barras padrões */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header[data-testid="stHeader"] {background: transparent;}
+
+    /* Botões principais e secundários modernos */
+    div.stButton > button, div.stLinkButton > a, div.stDownloadButton > button {
+        border-radius: 14px !important;
+        padding: 0.65rem 1.25rem !important;
+        font-weight: 700 !important;
+        font-size: 0.92rem !important;
+        letter-spacing: 0.2px !important;
+        transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+
+    /* Botões de destaque (primary) e ação */
+    div.stButton > button[kind="primary"],
+    div.stLinkButton > a[kind="primary"],
+    div.stDownloadButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #E11D48 0%, #FB7185 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        box-shadow: 0 6px 18px rgba(225, 29, 72, 0.28) !important;
+    }
+
+    div.stButton > button[kind="primary"]:hover,
+    div.stLinkButton > a[kind="primary"]:hover,
+    div.stDownloadButton > button[kind="primary"]:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 10px 24px rgba(225, 29, 72, 0.38) !important;
+        filter: brightness(1.04) !important;
+    }
+
+    /* Botões secundários com visual SaaS limpo */
+    div.stButton > button[kind="secondary"],
+    div.stLinkButton > a[kind="secondary"] {
+        background: #FFFFFF !important;
+        color: #0F172A !important;
+        border: 1.5px solid #E2E8F0 !important;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04) !important;
+    }
+
+    div.stButton > button[kind="secondary"]:hover:not(:disabled),
+    div.stLinkButton > a[kind="secondary"]:hover {
+        border-color: #E11D48 !important;
+        color: #E11D48 !important;
+        background: #FFF1F5 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 6px 16px rgba(225, 29, 72, 0.12) !important;
+    }
+
+    div.stButton > button:disabled {
+        background: #F1F5F9 !important;
+        color: #94A3B8 !important;
+        border: 1px solid #E2E8F0 !important;
+        box-shadow: none !important;
+    }
+
+    /* Cartões (containers com borda) elevados */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: #FFFFFF !important;
+        border-radius: 20px !important;
+        border: 1px solid #E2E8F0 !important;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05) !important;
+        padding: 16px !important;
+        transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease !important;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+        border-color: #FDA4AF !important;
+        box-shadow: 0 12px 30px rgba(225, 29, 72, 0.09) !important;
+    }
+
+    /* Imagens dos produtos arredondadas */
+    div[data-testid="stImage"] img {
+        border-radius: 14px !important;
+        object-fit: cover !important;
+    }
+
+    /* Abas (Tabs) estilo aplicativo moderno */
+    div[data-baseweb="tab-list"] {
+        gap: 6px !important;
+        background: #F1F5F9 !important;
+        padding: 5px !important;
+        border-radius: 16px !important;
+    }
+
+    button[data-baseweb="tab"] {
+        border-radius: 12px !important;
+        font-weight: 700 !important;
+        font-size: 0.88rem !important;
+        padding: 8px 16px !important;
+        color: #475569 !important;
+        border: none !important;
+        transition: all 0.2s ease !important;
+    }
+
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background: #FFFFFF !important;
+        color: #E11D48 !important;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08) !important;
+    }
+
+    div[data-baseweb="tab-highlight"] {
+        display: none !important;
+    }
+
+    /* Inputs e campos de texto modernos */
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="base-input"] > input {
+        border-radius: 12px !important;
+        border-color: #CBD5E1 !important;
+        background-color: #FFFFFF !important;
+    }
+
+    div[data-baseweb="input"] > div:focus-within {
+        border-color: #E11D48 !important;
+        box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.14) !important;
+    }
+
+    /* Métricas financeiras (KPIs) no topo do Admin */
+    div[data-testid="stMetric"] {
+        background: #F8FAFC !important;
+        border: 1px solid #E2E8F0 !important;
+        border-radius: 16px !important;
+        padding: 14px 16px !important;
+    }
+
+    /* Alertas (success, info, warning, error) mais suaves */
+    div[data-testid="stAlert"] {
+        border-radius: 14px !important;
+        border: none !important;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- CREDENCIAIS E CONFIGURAÇÕES ---
 SUPABASE_URL = "https://urghdzleaeocrsrvcnzx.supabase.co"
 SUPABASE_KEY = "sb_publishable_Xmc5ZOqss7NH2fuQgIvyFg_iy5DYwN6"
@@ -440,30 +592,37 @@ aberta = bool(config_loja.get("aberta", True))
 # --- CONTROLE DE ACESSO INVISÍVEL PARA O CLIENTE ---
 eh_admin = st.query_params.get("admin") == "1"
 
-# --- CABEÇALHO ---
+# --- CABEÇALHO MODERNO ---
 logo_b64 = obter_logo_base64()
 if logo_b64:
     st.markdown(
         f"""
-        <div style='text-align: center; padding: 10px 0 8px 0;'>
-            <img src='{logo_b64}' style='width: 120px; height: 120px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 12px rgba(0,0,0,0.12); margin-bottom: 8px;' />
-            <h1 style='margin: 0; font-size: 28px;'>{NOME_EMPRESA}</h1>
-            <p style='color: gray; font-size: 13px; margin-top: 4px;'>CNPJ: {CNPJ_EMPRESA} • Pronta Entrega</p>
+        <div style='text-align: center; padding: 14px 0 10px 0;'>
+            <img src='{logo_b64}' style='width: 112px; height: 112px; object-fit: cover; border-radius: 50%; border: 3px solid #FFFFFF; box-shadow: 0 8px 24px rgba(225, 29, 72, 0.18); margin-bottom: 10px;' />
+            <h1 style='margin: 0; font-size: 30px; font-weight: 800; color: #0F172A; letter-spacing: -0.5px;'>{NOME_EMPRESA}</h1>
+            <div style='display: inline-block; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 999px; padding: 4px 14px; margin-top: 6px; font-size: 12px; font-weight: 600; color: #64748B;'>
+                CNPJ: {CNPJ_EMPRESA} • Pronta Entrega
+            </div>
         </div>
         """,
         unsafe_allow_html=True
     )
     if eh_admin:
         st.sidebar.markdown(
-            f"<div style='text-align:center;'><img src='{logo_b64}' style='width:80px; height:80px; border-radius:50%; object-fit:cover;'/></div>",
+            f"<div style='text-align:center;'><img src='{logo_b64}' style='width:80px; height:80px; border-radius:50%; object-fit:cover; border: 2px solid #E11D48;'/></div>",
             unsafe_allow_html=True
         )
 else:
     st.markdown(
         f"""
-        <div style='text-align: center; padding: 10px 0 5px 0;'>
-            <h1 style='margin-bottom: 0;'>🧁 {NOME_EMPRESA}</h1>
-            <p style='color: gray; font-size: 14px; margin-top: 4px;'>CNPJ: {CNPJ_EMPRESA} • Pronta Entrega</p>
+        <div style='text-align: center; padding: 14px 0 10px 0;'>
+            <div style='display: inline-flex; align-items: center; justify-content: center; width: 68px; height: 68px; border-radius: 22px; background: linear-gradient(135deg, #E11D48 0%, #FB7185 100%); color: white; font-size: 34px; box-shadow: 0 8px 20px rgba(225, 29, 72, 0.25); margin-bottom: 10px;'>
+                🧁
+            </div>
+            <h1 style='margin: 0; font-size: 30px; font-weight: 800; color: #0F172A; letter-spacing: -0.5px;'>{NOME_EMPRESA}</h1>
+            <div style='display: inline-block; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 999px; padding: 4px 14px; margin-top: 6px; font-size: 12px; font-weight: 600; color: #64748B;'>
+                CNPJ: {CNPJ_EMPRESA} • Pronta Entrega
+            </div>
         </div>
         """,
         unsafe_allow_html=True
@@ -512,14 +671,15 @@ if modo == "🧁 Vitrine do Cliente":
                         if prod.get("imagem_url"):
                             st.image(prod["imagem_url"], use_container_width=True)
                         st.markdown(f"**{prod['nome']}**")
-                        st.markdown(f"### R$ {float(prod['preco']):.2f}")
+                        st.markdown(f"<h3 style='margin: 2px 0 6px 0; color: #E11D48; font-weight: 800;'>R$ {float(prod['preco']):.2f}</h3>", unsafe_allow_html=True)
                         if estoque <= 0:
                             st.error("🔴 INDISPONÍVEL")
                         else:
                             st.caption(f"🟢 {estoque} disponíveis")
                             no_carrinho = st.session_state.carrinho.get(pid, 0)
                             texto_btn = "🔒 Loja Fechada" if not aberta else (f"🛒 No carrinho ({no_carrinho})" if no_carrinho > 0 else "👆 Selecionar")
-                            if st.button(texto_btn, key=f"sel_{pid}", disabled=(not aberta), use_container_width=True):
+                            tipo_btn = "primary" if (aberta and no_carrinho == 0) else "secondary"
+                            if st.button(texto_btn, key=f"sel_{pid}", type=tipo_btn, disabled=(not aberta), use_container_width=True):
                                 modal_selecionar_doce(prod)
 
             if aberta and total_itens > 0:
@@ -534,10 +694,10 @@ if modo == "🧁 Vitrine do Cliente":
 
             st.markdown(
                 f"""
-                <div style='background:#fff1f5; border:2px dashed #e11d48; border-radius:16px; padding:16px; text-align:center; margin-bottom:16px;'>
-                    <p style='margin:0; font-size:12px; font-weight:bold; color:#be123c; text-transform:uppercase;'>Número do seu Pedido</p>
-                    <h1 style='margin:4px 0; font-size:48px; color:#be123c;'>#{dados['numero_dia']:02d}</h1>
-                    <p style='margin:0; font-size:12px; color:#881337;'>Informe este número na retirada ou entrega</p>
+                <div style='background: linear-gradient(135deg, #FFF1F5 0%, #FFE4E6 100%); border: 2px dashed #E11D48; border-radius: 20px; padding: 20px; text-align: center; margin-bottom: 16px; box-shadow: 0 8px 20px rgba(225, 29, 72, 0.1);'>
+                    <p style='margin:0; font-size:12px; font-weight:800; color:#BE123C; text-transform:uppercase; letter-spacing: 1px;'>Número do seu Pedido</p>
+                    <h1 style='margin:4px 0; font-size:52px; font-weight:800; color:#E11D48;'>#{dados['numero_dia']:02d}</h1>
+                    <p style='margin:0; font-size:13px; color:#881337; font-weight: 500;'>Informe este número na retirada ou entrega</p>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -556,7 +716,7 @@ if modo == "🧁 Vitrine do Cliente":
             st.code(dados["pix_code"], language=None)
             st.link_button("📲 Enviar Pedido e Comprovante no WhatsApp", dados["link_wa"], type="primary", use_container_width=True)
 
-            if st.button("Fazer novo pedido"):
+            if st.button("Fazer novo pedido", use_container_width=True):
                 st.session_state.pedido_concluido = None
                 st.session_state.dados_entrega = None
                 st.session_state.buscar_gps = False
@@ -577,7 +737,7 @@ if modo == "🧁 Vitrine do Cliente":
                 with c1:
                     st.write(f"**{qtd}x** {p['nome']} — R$ {sub:.2f}")
                 with c2:
-                    if st.button("Remover", key=f"rm_{pid}"):
+                    if st.button("Remover", key=f"rm_{pid}", use_container_width=True):
                         del st.session_state.carrinho[pid]
                         st.rerun()
 
@@ -606,7 +766,7 @@ if modo == "🧁 Vitrine do Cliente":
                 with col_ci:
                     st.success(f"Cupom **{codigo_cupom_str}** aplicado (-R$ {valor_desconto:.2f})")
                 with col_cr:
-                    if st.button("Tirar"):
+                    if st.button("Tirar", use_container_width=True):
                         st.session_state.cupom_aplicado = None
                         st.rerun()
 
@@ -919,7 +1079,10 @@ elif modo == "🔐 Área da Confeiteira":
                             st.markdown(f"**{prod['nome']}**")
                             st.caption(f"R$ {float(prod['preco']):.2f}")
                             est = prod["estoque"]
-                            st.success(f"Disponível: {est}") if est > 0 else st.error("Esgotado (0)")
+                            if est > 0:
+                                st.success(f"Disponível: {est}")
+                            else:
+                                st.error("Esgotado (0)")
                             if st.button("✏️ Informar Qtd", key=f"adm_{prod['id']}", use_container_width=True):
                                 modal_estoque(prod)
 
@@ -1079,6 +1242,6 @@ elif modo == "🔐 Área da Confeiteira":
 # --- RODAPÉ OFICIAL ---
 st.divider()
 st.markdown(
-    f"<div style='text-align: center; color: gray; font-size: 12px;'>{NOME_EMPRESA} • CNPJ: {CNPJ_EMPRESA}</div>",
+    f"<div style='text-align: center; color: #64748B; font-size: 12px; font-weight: 500;'>{NOME_EMPRESA} • CNPJ: {CNPJ_EMPRESA}</div>",
     unsafe_allow_html=True
 )
