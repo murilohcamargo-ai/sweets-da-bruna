@@ -34,6 +34,7 @@ CIDADE_RECEBEDOR = "RONDONOPOLIS"     # Até 15 letras, sem acento
 # --- LOCALIZAÇÃO DA DOCERIA (Rua Nicola Silveira, 470 - Jardim Primavera, Rondonópolis - MT) ---
 LAT_LOJA = -16.4478
 LON_LOJA = -54.6167
+LINK_MAPS_LOJA = f"https://www.google.com/maps/search/?api=1&query={LAT_LOJA},{LON_LOJA}"
 
 # --- TABELA DE PREÇOS DO ENTREGADOR ---
 TABELA_FRETE = [
@@ -795,6 +796,13 @@ if modo == "🧁 Vitrine do Cliente":
                 unsafe_allow_html=True
             )
 
+            if dados.get("entrega") == "Retirar no local":
+                with st.container(border=True):
+                    st.markdown("### 📍 Local para Retirada")
+                    st.write(f"**{NOME_EMPRESA}**")
+                    st.write(ENDERECO_LOJA)
+                    st.link_button("🗺️ Abrir Localização no Google Maps", LINK_MAPS_LOJA, use_container_width=True)
+
             if dados.get("premio_fidelidade") and dados["premio_fidelidade"].get("ganhou"):
                 premio = dados["premio_fidelidade"]
                 st.balloons()
@@ -870,7 +878,9 @@ if modo == "🧁 Vitrine do Cliente":
             link_rota_entregador = ""
             endereco_texto = ""
 
-            if entrega == "Entrega (Delivery)":
+            if entrega == "Retirar no local":
+                st.info(f"📍 **Endereço de Retirada:** {ENDERECO_LOJA}\n\n🗺️ [Ver no Google Maps]({LINK_MAPS_LOJA})")
+            elif entrega == "Entrega (Delivery)":
                 if st.button("📍 Calcular Frete com Minha Localização", use_container_width=True):
                     st.session_state.buscar_gps = True
                 if st.session_state.buscar_gps:
@@ -931,10 +941,10 @@ if modo == "🧁 Vitrine do Cliente":
                             "desconto": valor_desconto,
                             "total": total_geral,
                             "entrega": entrega,
-                            "endereco": endereco_texto,
+                            "endereco": endereco_texto if entrega == "Entrega (Delivery)" else ENDERECO_LOJA,
                             "frete": valor_frete,
                             "distancia_km": distancia_km,
-                            "rota_maps": link_rota_entregador
+                            "rota_maps": link_rota_entregador if entrega == "Entrega (Delivery)" else LINK_MAPS_LOJA
                         }).execute()
 
                         if st.session_state.cupom_aplicado and st.session_state.cupom_aplicado.get("uso_unico"):
@@ -955,10 +965,14 @@ if modo == "🧁 Vitrine do Cliente":
                             f"*Total Geral:* R$ {total_geral:.2f}",
                             f"*Recebimento:* {entrega}",
                         ]
-                        if endereco_texto:
-                            msg.append(f"*Endereço:* {endereco_texto}")
-                        if link_rota_entregador:
-                            msg.append(f"*🛵 Rota p/ Entregador:* {link_rota_entregador}")
+                        if entrega == "Retirar no local":
+                            msg.append(f"*📍 Local de Retirada:* {ENDERECO_LOJA}")
+                            msg.append(f"*🗺️ Localização no Mapa:* {LINK_MAPS_LOJA}")
+                        else:
+                            if endereco_texto:
+                                msg.append(f"*Endereço:* {endereco_texto}")
+                            if link_rota_entregador:
+                                msg.append(f"*🛵 Rota p/ Entregador:* {link_rota_entregador}")
                         if premio and premio.get("ganhou"):
                             msg.append(f"\n🎁 *Ganhei o cupom fidelidade:* {premio['codigo']} ({int(premio['desconto'])}% OFF)")
                         msg.append("*Pagamento:* Pix (confirmando pedido e enviando comprovante)")
@@ -971,6 +985,7 @@ if modo == "🧁 Vitrine do Cliente":
                         st.session_state.pedido_concluido = {
                             "numero_dia": num_dia,
                             "total": total_geral,
+                            "entrega": entrega,
                             "pix_code": pix_code,
                             "link_wa": link_wa,
                             "premio_fidelidade": premio
@@ -1073,7 +1088,6 @@ elif modo == "🔐 Área da Confeiteira":
         with aba_fila:
             pedidos_ativos = supabase.table("pedidos").select("*").in_("status", ["pendente", "separando"]).order("id", desc=False).execute().data
 
-            # Visão rápida: O que separar vs O que está disponível para venda
             c_gel1, c_gel2 = st.columns(2)
             with c_gel1:
                 with st.container(border=True):
@@ -1162,10 +1176,15 @@ elif modo == "🔐 Área da Confeiteira":
                                     )
                                     st.link_button("🛵 Avisar Saiu", f"https://wa.me/{tel_wa}?text={msg_saiu}", use_container_width=True)
                                 else:
+                                    itens_msg_ret = ped["itens"].replace(" | ", "\n• ")
                                     msg_pronto = urllib.parse.quote(
-                                        f"Oi {ped['cliente']}! 🛍️✨ Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* já está prontinho te esperando para retirada!"
+                                        f"Oi {ped['cliente']}! 🛍️✨ Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* já está prontinho para retirada!\n\n"
+                                        f"*Itens:*\n• {itens_msg_ret}\n"
+                                        f"*Total:* R$ {float(ped['total']):.2f}\n\n"
+                                        f"📍 *Endereço:* {ENDERECO_LOJA}\n"
+                                        f"🗺️ *Localização:* {LINK_MAPS_LOJA}"
                                     )
-                                    st.link_button("🛍️ Avisar Pronto", f"https://wa.me/{tel_wa}?text={msg_pronto}", use_container_width=True)
+                                    st.link_button("🛍️ Avisar Pronto + Mapa", f"https://wa.me/{tel_wa}?text={msg_pronto}", use_container_width=True)
 
                         with b3:
                             if st.button("✔️ Concluir Sacola", key=f"done_{ped['id']}", type="primary", use_container_width=True):
@@ -1421,4 +1440,3 @@ st.divider()
 st.markdown(
     f"<div style='text-align: center; color: #64748B; font-size: 12px; font-weight: 500;'>{NOME_EMPRESA} • CNPJ: {CNPJ_EMPRESA}</div>",
     unsafe_allow_html=True
-)
