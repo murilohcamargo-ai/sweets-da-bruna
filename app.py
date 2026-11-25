@@ -297,6 +297,48 @@ def renderizar_etiquetas_pedido(entrega: str, pago: bool):
     )
     st.markdown(f"<div class='badge-row'>{badge_tipo}{badge_pag}</div>", unsafe_allow_html=True)
 
+# --- MONTAGEM DO LINK WHATSAPP PARA O CLIENTE ---
+def montar_link_whatsapp_cliente(
+    numero_dia: int,
+    cliente: str,
+    telefone_fmt: str,
+    itens_lista_txt: list,
+    total_geral: float,
+    entrega: str,
+    endereco_texto: str,
+    pix_code: str,
+    premio: dict = None
+) -> str:
+    tel_digitos = re.sub(r"\D", "", telefone_fmt)
+    destino_wa = f"55{tel_digitos}" if len(tel_digitos) in (10, 11) else WHATSAPP_LOJA
+
+    msg = [
+        f"Oi *{cliente}*! 🧁✨ Recebemos o seu pedido na *{NOME_EMPRESA}* e *ele já está em separação!*",
+        f"_CNPJ: {CNPJ_EMPRESA}_",
+        "",
+        f"🛍️ *PEDIDO #{numero_dia:02d}*",
+        "*Itens:*",
+    ] + [f"• {l}" for l in itens_lista_txt] + [
+        "",
+        f"💰 *Total:* R$ {total_geral:.2f}",
+        f"📦 *Recebimento:* {entrega}",
+    ]
+
+    if entrega == "Retirar no local":
+        msg.append(f"📍 *Local de Retirada:* {ENDERECO_LOJA}")
+        msg.append(f"🗺️ *Mapa:* {LINK_MAPS_LOJA}")
+    elif endereco_texto:
+        msg.append(f"📍 *Endereço de Entrega:* {endereco_texto}")
+
+    if premio and premio.get("ganhou"):
+        msg.append(f"\n🎁 *Parabéns! Você ganhou o cupom fidelidade:* {premio['codigo']} ({int(premio['desconto'])}% OFF)")
+
+    msg.append("\n💳 *Pix Copia e Cola:*")
+    msg.append(pix_code)
+    msg.append("\n_Assim que concluir o Pix, pode enviar o comprovante aqui mesmo!_")
+
+    return f"https://wa.me/{destino_wa}?text={urllib.parse.quote(chr(10).join(msg))}"
+
 # --- CANCELAMENTO E DEVOLUÇÃO AUTOMÁTICA AO ESTOQUE ---
 def cancelar_pedido_e_devolver_estoque(pedido: dict):
     produtos_db = listar_produtos()
@@ -571,6 +613,57 @@ def modal_logo_loja():
             st.toast("Logo atualizada com sucesso!")
             st.rerun()
 
+@st.dialog("✏️ Corrigir Meus Dados do Pedido")
+def modal_cliente_editar_dados():
+    dados = st.session_state.pedido_concluido
+    if not dados:
+        return
+    st.caption(f"Pedido **#{dados['numero_dia']:02d}** — Errou o número, nome ou endereço? Corrija abaixo:")
+    novo_nome = st.text_input("Seu Nome *", value=dados.get("cliente", ""))
+    novo_tel_raw = st.text_input("WhatsApp / Telefone *", value=dados.get("telefone", ""), max_chars=14)
+    novo_tel_fmt, novo_tel_valido = formatar_telefone(novo_tel_raw)
+    if novo_tel_raw:
+        st.caption(f"📱 Contato formatado: **{novo_tel_fmt}**" if novo_tel_valido else "⚠️ Digite DDD + número (ex: 6699999999)")
+
+    novo_end = dados.get("endereco", "")
+    if dados.get("entrega") == "Entrega (Delivery)":
+        novo_end = st.text_input("Endereço Completo (Rua, Número, Bairro) *", value=novo_end)
+
+    if st.button("💾 Salvar Alterações", type="primary", use_container_width=True):
+        if not novo_nome.strip() or not novo_tel_valido:
+            st.warning("Preencha o nome e o telefone corretamente.")
+        elif dados.get("entrega") == "Entrega (Delivery)" and not novo_end.strip():
+            st.warning("Preencha o endereço de entrega.")
+        else:
+            end_final = novo_end.strip() if dados.get("entrega") == "Entrega (Delivery)" else ENDERECO_LOJA
+            if dados.get("pedido_id"):
+                supabase.table("pedidos").update({
+                    "cliente": novo_nome.strip(),
+                    "telefone": novo_tel_fmt,
+                    "endereco": end_final
+                }).eq("id", dados["pedido_id"]).execute()
+
+            novo_link_wa = montar_link_whatsapp_cliente(
+                numero_dia=dados["numero_dia"],
+                cliente=novo_nome.strip(),
+                telefone_fmt=novo_tel_fmt,
+                itens_lista_txt=dados.get("resumo_txt", []),
+                total_geral=dados["total"],
+                entrega=dados["entrega"],
+                endereco_texto=end_final,
+                pix_code=dados["pix_code"],
+                premio=dados.get("premio_fidelidade")
+            )
+
+            dados["cliente"] = novo_nome.strip()
+            dados["telefone"] = novo_tel_fmt
+            dados["endereco"] = end_final
+            dados["link_wa"] = novo_link_wa
+            st.session_state.pedido_concluido = dados
+            st.session_state.abrir_wa_auto = True
+            st.toast("Dados corrigidos e WhatsApp atualizado!")
+            st.rerun()
+
 @st.dialog("❌ Cancelar Pedido")
 def modal_cancelar_pedido(pedido):
     num_sacola = f"#{int(pedido.get('numero_dia') or pedido['id']):02d}"
@@ -630,74 +723,111 @@ def modal_selecionar_doce(produto):
         st.session_state.pedido_concluido = None
         st.rerun()
 
-@st.dialog("✏️ Acrescentar Itens na Sacola")
+@st.dialog("✏️ Editar Pedido (Dados ou Itens)")
 def modal_editar_pedido_separado(pedido, produtos):
     num_sacola = f"#{int(pedido.get('numero_dia') or pedido['id']):02d}"
     st.subheader(f"Sacola {num_sacola} — {pedido['cliente']}")
-    st.info("✅ **Itens já separados dentro da sacola (não serão repetidos):**")
-    for parte in pedido["itens"].split(" | "):
-        st.write(f"• {parte}")
 
-    st.divider()
-    st.markdown("**➕ Selecione o que o cliente pediu para acrescentar:**")
+    tab_dados, tab_itens = st.tabs(["👤 Nome / Número / Endereço", "➕ Acrescentar Doces"])
 
-    produtos_disp = [p for p in produtos if int(p["estoque"]) > 0]
-    if not produtos_disp:
-        st.warning("Não há outros produtos com estoque disponível no momento.")
-        return
+    with tab_dados:
+        st.caption("Corrija os dados do cliente caso ele tenha digitado errado:")
+        ed_nome = st.text_input("Nome do Cliente *", value=pedido.get("cliente", ""), key=f"ed_nome_{pedido['id']}")
+        ed_tel_raw = st.text_input("WhatsApp / Telefone *", value=pedido.get("telefone", ""), max_chars=14, key=f"ed_tel_{pedido['id']}")
+        ed_tel_fmt, ed_tel_ok = formatar_telefone(ed_tel_raw)
+        if ed_tel_raw:
+            st.caption(f"📱 Formatado: **{ed_tel_fmt}**" if ed_tel_ok else "⚠️ Digite DDD + número válido")
 
-    acrescimos = []
-    valor_extra = 0.0
+        opcoes_ent = ["Retirar no local", "Entrega (Delivery)"]
+        idx_ent = 1 if pedido.get("entrega") == "Entrega (Delivery)" else 0
+        ed_entrega = st.radio("Tipo de Recebimento", opcoes_ent, index=idx_ent, horizontal=True, key=f"ed_ent_{pedido['id']}")
 
-    for prod in produtos_disp:
-        c1, c2 = st.columns([2.5, 1])
-        with c1:
-            st.write(f"**{prod['nome']}** (R$ {float(prod['preco']):.2f})")
-            st.caption(f"Estoque: {prod['estoque']} un.")
-        with c2:
-            qtd_add = st.number_input(
-                "Qtd",
-                min_value=0,
-                max_value=int(prod["estoque"]),
-                value=0,
-                step=1,
-                key=f"edit_add_{pedido['id']}_{prod['id']}",
-                label_visibility="collapsed"
-            )
-            if qtd_add > 0:
-                sub = qtd_add * float(prod["preco"])
-                valor_extra += sub
-                acrescimos.append((prod, qtd_add, sub))
-
-    if acrescimos:
-        st.success(f"Valor do acréscimo: **+R$ {valor_extra:.2f}** (Novo total: **R$ {float(pedido['total']) + valor_extra:.2f}**)")
-
-    if st.button("🔄 Voltar para 'A Separar' só com o Acréscimo", type="primary", use_container_width=True):
-        if not acrescimos:
-            st.warning("Escolha a quantidade de pelo menos 1 item para acrescentar.")
+        if ed_entrega == "Entrega (Delivery)":
+            val_end_inicial = "" if pedido.get("endereco") == ENDERECO_LOJA else (pedido.get("endereco") or "")
+            ed_endereco = st.text_input("Endereço de Entrega *", value=val_end_inicial, key=f"ed_end_{pedido['id']}")
         else:
-            novos_trechos = []
-            for prod, qtd_add, sub in acrescimos:
-                novo_est = int(prod["estoque"]) - qtd_add
-                supabase.table("produtos").update({"estoque": novo_est}).eq("id", prod["id"]).execute()
-                novos_trechos.append(f"{qtd_add}x {prod['nome']} (R$ {sub:.2f})")
+            ed_endereco = ENDERECO_LOJA
 
-            str_acrescimo = " | ".join(novos_trechos)
-            itens_completos = f"{pedido['itens']} | {str_acrescimo}"
-            novo_total = float(pedido["total"]) + valor_extra
+        if st.button("💾 Salvar Dados do Cliente", type="primary", use_container_width=True, key=f"btn_save_dados_{pedido['id']}"):
+            if not ed_nome.strip() or not ed_tel_ok:
+                st.warning("Informe um nome e telefone válidos.")
+            elif ed_entrega == "Entrega (Delivery)" and not ed_endereco.strip():
+                st.warning("Informe o endereço de entrega.")
+            else:
+                supabase.table("pedidos").update({
+                    "cliente": ed_nome.strip(),
+                    "telefone": ed_tel_fmt,
+                    "entrega": ed_entrega,
+                    "endereco": ed_endereco.strip()
+                }).eq("id", pedido["id"]).execute()
+                st.toast(f"Dados da Sacola {num_sacola} atualizados!")
+                st.rerun()
 
-            status_atual_ped = pedido.get("status", "")
-            novo_status = "a_separar_pago" if "pago" in status_atual_ped else "pendente"
+    with tab_itens:
+        st.info("✅ **Itens já separados dentro da sacola (não serão repetidos):**")
+        for parte in pedido["itens"].split(" | "):
+            st.write(f"• {parte}")
 
-            supabase.table("pedidos").update({
-                "itens": itens_completos,
-                "itens_acrescentados": str_acrescimo,
-                "total": novo_total,
-                "status": novo_status
-            }).eq("id", pedido["id"]).execute()
+        st.divider()
+        st.markdown("**➕ Selecione o que o cliente pediu para acrescentar:**")
 
-            st.toast(f"Sacola {num_sacola} voltou para separar apenas os itens acrescentados!")
-            st.rerun()
+        produtos_disp = [p for p in produtos if int(p["estoque"]) > 0]
+        if not produtos_disp:
+            st.warning("Não há outros produtos com estoque disponível no momento.")
+            return
+
+        acrescimos = []
+        valor_extra = 0.0
+
+        for prod in produtos_disp:
+            c1, c2 = st.columns([2.5, 1])
+            with c1:
+                st.write(f"**{prod['nome']}** (R$ {float(prod['preco']):.2f})")
+                st.caption(f"Estoque: {prod['estoque']} un.")
+            with c2:
+                qtd_add = st.number_input(
+                    "Qtd",
+                    min_value=0,
+                    max_value=int(prod["estoque"]),
+                    value=0,
+                    step=1,
+                    key=f"edit_add_{pedido['id']}_{prod['id']}",
+                    label_visibility="collapsed"
+                )
+                if qtd_add > 0:
+                    sub = qtd_add * float(prod["preco"])
+                    valor_extra += sub
+                    acrescimos.append((prod, qtd_add, sub))
+
+        if acrescimos:
+            st.success(f"Valor do acréscimo: **+R$ {valor_extra:.2f}** (Novo total: **R$ {float(pedido['total']) + valor_extra:.2f}**)")
+
+        if st.button("🔄 Voltar para 'A Separar' só com o Acréscimo", type="primary", use_container_width=True, key=f"btn_add_itens_{pedido['id']}"):
+            if not acrescimos:
+                st.warning("Escolha a quantidade de pelo menos 1 item para acrescentar.")
+            else:
+                novos_trechos = []
+                for prod, qtd_add, sub in acrescimos:
+                    novo_est = int(prod["estoque"]) - qtd_add
+                    supabase.table("produtos").update({"estoque": novo_est}).eq("id", prod["id"]).execute()
+                    novos_trechos.append(f"{qtd_add}x {prod['nome']} (R$ {sub:.2f})")
+
+                str_acrescimo = " | ".join(novos_trechos)
+                itens_completos = f"{pedido['itens']} | {str_acrescimo}"
+                novo_total = float(pedido["total"]) + valor_extra
+
+                status_atual_ped = pedido.get("status", "")
+                novo_status = "a_separar_pago" if "pago" in status_atual_ped else "pendente"
+
+                supabase.table("pedidos").update({
+                    "itens": itens_completos,
+                    "itens_acrescentados": str_acrescimo,
+                    "total": novo_total,
+                    "status": novo_status
+                }).eq("id", pedido["id"]).execute()
+
+                st.toast(f"Sacola {num_sacola} voltou para separar apenas os itens acrescentados!")
+                st.rerun()
 
 # --- ESTADO DA SESSÃO ---
 if "carrinho" not in st.session_state:
@@ -839,21 +969,24 @@ if modo == "🧁 Vitrine do Cliente":
             dados = st.session_state.pedido_concluido
 
             if st.session_state.abrir_wa_auto:
-                streamlit_js_eval(js_expressions=f"window.open('{dados['link_wa']}', '_blank')", key=f"wa_auto_{dados['numero_dia']}")
+                streamlit_js_eval(js_expressions=f"window.open('{dados['link_wa']}', '_blank')", key=f"wa_auto_{dados['numero_dia']}_{dados.get('telefone', '')}")
                 st.session_state.abrir_wa_auto = False
 
-            st.success("🎉 Pedido reservado e enviado para o WhatsApp da loja!")
+            st.success(f"🎉 Pedido reservado! Enviamos a confirmação de que já está em separação para o WhatsApp **{dados.get('telefone', '')}**!")
 
             st.markdown(
                 f"""
                 <div style='background: linear-gradient(135deg, #FFF1F5 0%, #FFE4E6 100%); border: 2px dashed #E11D48; border-radius: 20px; padding: 20px; text-align: center; margin-bottom: 16px; box-shadow: 0 8px 20px rgba(225, 29, 72, 0.1);'>
                     <p style='margin:0; font-size:12px; font-weight:800; color:#BE123C; text-transform:uppercase; letter-spacing: 1px;'>Número do seu Pedido</p>
                     <h1 style='margin:4px 0; font-size:52px; font-weight:800; color:#E11D48;'>#{dados['numero_dia']:02d}</h1>
-                    <p style='margin:0; font-size:13px; color:#881337; font-weight: 500;'>Informe este número na retirada ou entrega</p>
+                    <p style='margin:0; font-size:13px; color:#881337; font-weight: 500;'>Cliente: <b>{dados.get('cliente', '')}</b> • WhatsApp: <b>{dados.get('telefone', '')}</b></p>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
+
+            if st.button("✏️ Corrigir Meu Nome, Telefone ou Endereço", use_container_width=True):
+                modal_cliente_editar_dados()
 
             if dados.get("entrega") == "Retirar no local":
                 with st.container(border=True):
@@ -861,6 +994,10 @@ if modo == "🧁 Vitrine do Cliente":
                     st.write(f"**{NOME_EMPRESA}**")
                     st.write(ENDERECO_LOJA)
                     st.link_button("🗺️ Abrir Localização no Google Maps", LINK_MAPS_LOJA, use_container_width=True)
+            else:
+                with st.container(border=True):
+                    st.markdown("### 🛵 Endereço de Entrega")
+                    st.write(dados.get("endereco", ""))
 
             if dados.get("premio_fidelidade") and dados["premio_fidelidade"].get("ganhou"):
                 premio = dados["premio_fidelidade"]
@@ -873,7 +1010,7 @@ if modo == "🧁 Vitrine do Cliente":
             st.markdown(f"### Total a Pagar: R$ {dados['total']:.2f}")
             st.caption(f"Favorecido: **{NOME_EMPRESA}** • CNPJ: **{CNPJ_EMPRESA}**")
             st.code(dados["pix_code"], language=None)
-            st.link_button("📲 Abrir WhatsApp da Loja / Enviar Comprovante", dados["link_wa"], type="primary", use_container_width=True)
+            st.link_button(f"📲 Receber Confirmação no Meu WhatsApp ({dados.get('telefone', '')})", dados["link_wa"], type="primary", use_container_width=True)
 
             if st.button("Fazer novo pedido", use_container_width=True):
                 st.session_state.pedido_concluido = None
@@ -969,7 +1106,7 @@ if modo == "🧁 Vitrine do Cliente":
             if tel_raw:
                 st.caption(f"📱 Contato formatado: **{tel_formatado}**" if tel_valido else "⚠️ Digite DDD + número (ex: 6699999999 -> **669.999-9999**)")
 
-            if st.button("✅ Confirmar Pedido e Enviar no WhatsApp", type="primary", use_container_width=True):
+            if st.button("✅ Confirmar Pedido e Receber no Meu WhatsApp", type="primary", use_container_width=True):
                 if not bool(obter_config_loja().get("aberta", True)):
                     st.error("🔴 A loja fechou.")
                 elif not nome_cli.strip() or not tel_valido:
@@ -989,7 +1126,9 @@ if modo == "🧁 Vitrine do Cliente":
 
                         num_dia = gerar_proximo_numero_dia()
                         itens_str = " | ".join(resumo_txt)
-                        supabase.table("pedidos").insert({
+                        end_salvo = endereco_texto.strip() if entrega == "Entrega (Delivery)" else ENDERECO_LOJA
+
+                        res_ins = supabase.table("pedidos").insert({
                             "numero_dia": num_dia,
                             "status": "pendente",
                             "cliente": nome_cli.strip(),
@@ -1000,11 +1139,13 @@ if modo == "🧁 Vitrine do Cliente":
                             "desconto": valor_desconto,
                             "total": total_geral,
                             "entrega": entrega,
-                            "endereco": endereco_texto if entrega == "Entrega (Delivery)" else ENDERECO_LOJA,
+                            "endereco": end_salvo,
                             "frete": valor_frete,
                             "distancia_km": distancia_km,
                             "rota_maps": link_rota_entregador if entrega == "Entrega (Delivery)" else LINK_MAPS_LOJA
                         }).execute()
+
+                        pedido_id_criado = res_ins.data[0]["id"] if res_ins.data else None
 
                         if st.session_state.cupom_aplicado and st.session_state.cupom_aplicado.get("uso_unico"):
                             supabase.table("cupons").update({"ativo": False}).eq("id", st.session_state.cupom_aplicado["id"]).execute()
@@ -1012,41 +1153,32 @@ if modo == "🧁 Vitrine do Cliente":
                         premio = verificar_premio_fidelidade(tel_formatado, max(0.0, subtotal_doces - valor_desconto), config_loja)
                         pix_code = gerar_pix_copia_cola(CHAVE_PIX, NOME_RECEBEDOR, CIDADE_RECEBEDOR, total_geral, f"PED{num_dia:02d}")
 
-                        msg = [
-                            f"*{NOME_EMPRESA.upper()}* 🧁",
-                            f"_CNPJ: {CNPJ_EMPRESA}_",
-                            f"*PEDIDO #{num_dia:02d}*",
-                            f"*Cliente:* {nome_cli.strip()} ({tel_formatado})",
-                            "",
-                            "*Itens:*",
-                        ] + [f"• {l}" for l in resumo_txt] + [
-                            "",
-                            f"*Total Geral:* R$ {total_geral:.2f}",
-                            f"*Recebimento:* {entrega}",
-                        ]
-                        if entrega == "Retirar no local":
-                            msg.append(f"*📍 Local de Retirada:* {ENDERECO_LOJA}")
-                            msg.append(f"*🗺️ Localização no Mapa:* {LINK_MAPS_LOJA}")
-                        else:
-                            if endereco_texto:
-                                msg.append(f"*Endereço:* {endereco_texto}")
-                            if link_rota_entregador:
-                                msg.append(f"*🛵 Rota p/ Entregador:* {link_rota_entregador}")
-                        if premio and premio.get("ganhou"):
-                            msg.append(f"\n🎁 *Ganhei o cupom fidelidade:* {premio['codigo']} ({int(premio['desconto'])}% OFF)")
-                        msg.append("*Pagamento:* Pix (confirmando pedido e enviando comprovante)")
-
-                        link_wa = f"https://wa.me/{WHATSAPP_LOJA}?text={urllib.parse.quote(chr(10).join(msg))}"
+                        link_wa_cliente = montar_link_whatsapp_cliente(
+                            numero_dia=num_dia,
+                            cliente=nome_cli.strip(),
+                            telefone_fmt=tel_formatado,
+                            itens_lista_txt=resumo_txt,
+                            total_geral=total_geral,
+                            entrega=entrega,
+                            endereco_texto=end_salvo,
+                            pix_code=pix_code,
+                            premio=premio
+                        )
 
                         st.session_state.carrinho = {}
                         st.session_state.cupom_aplicado = None
                         st.session_state.abrir_wa_auto = True
                         st.session_state.pedido_concluido = {
+                            "pedido_id": pedido_id_criado,
                             "numero_dia": num_dia,
+                            "cliente": nome_cli.strip(),
+                            "telefone": tel_formatado,
+                            "endereco": end_salvo,
+                            "resumo_txt": resumo_txt,
                             "total": total_geral,
                             "entrega": entrega,
                             "pix_code": pix_code,
-                            "link_wa": link_wa,
+                            "link_wa": link_wa_cliente,
                             "premio_fidelidade": premio
                         }
                         st.rerun()
@@ -1223,10 +1355,10 @@ elif modo == "🔐 Área da Confeiteira":
                             if st.button("❌ Cancelar", key=f"cancel_fila_{ped['id']}", use_container_width=True):
                                 modal_cancelar_pedido(ped)
 
-        # --- ABA 2: PEDIDOS SEPARADOS (PAGAMENTO, AVISAR CLIENTE E ENTREGADOR) ---
+        # --- ABA 2: PEDIDOS SEPARADOS (PAGAMENTO, AVISAR CLIENTE, ENTREGADOR E EDIÇÃO) ---
         with aba_separados:
             st.markdown("### ✅ Sacolas Separadas — Pagamento & Envio")
-            st.caption("Confirme o Pix do cliente, avise quando estiver pronto/saiu e envie a rota ao entregador:")
+            st.caption("Confirme o Pix do cliente, avise quando estiver pronto/saiu, edite dados ou envie a rota ao entregador:")
 
             pedidos_separados = supabase.table("pedidos").select("*").in_("status", ["separado_pendente", "separado_pago", "concluido", "separando"]).order("id", desc=True).limit(50).execute().data
             if not pedidos_separados:
@@ -1307,10 +1439,10 @@ elif modo == "🔐 Área da Confeiteira":
                                 )
                                 st.link_button("🛍️ Avisar Cliente (Pronto + Localização)", f"https://wa.me/{tel_wa}?text={msg_pronto}", type="primary", use_container_width=True)
 
-                        # --- EDITAR / ACRESCENTAR OU CANCELAR ---
+                        # --- EDITAR DADOS / ITENS OU CANCELAR ---
                         ce1, ce2 = st.columns(2)
                         with ce1:
-                            if st.button("✏️ Editar / Acrescentar", key=f"edit_sep_{ped['id']}", use_container_width=True):
+                            if st.button("✏️ Editar Dados / Itens", key=f"edit_sep_{ped['id']}", use_container_width=True):
                                 modal_editar_pedido_separado(ped, produtos_atual)
                         with ce2:
                             if st.button("❌ Cancelar Pedido", key=f"cancel_sep_{ped['id']}", use_container_width=True):
