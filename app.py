@@ -686,7 +686,6 @@ def modal_editar_pedido_separado(pedido, produtos):
             itens_completos = f"{pedido['itens']} | {str_acrescimo}"
             novo_total = float(pedido["total"]) + valor_extra
 
-            # Mantém o status de pagamento (se já estava pago, volta como separado_pendente porém marcado pago)
             status_atual_ped = pedido.get("status", "")
             novo_status = "a_separar_pago" if "pago" in status_atual_ped else "pendente"
 
@@ -1286,21 +1285,23 @@ elif modo == "🔐 Área da Confeiteira":
                                     st.link_button("🛵 Avisar Cliente (Saiu)", f"https://wa.me/{tel_wa}?text={msg_saiu}", type="primary", use_container_width=True)
                             with ca2:
                                 rota_txt = ped.get("rota_maps") or ""
+                                status_pag_motoboy = "✅ JÁ PAGO" if esta_pago else f"⏳ COBRAR R$ {float(ped['total']):.2f}"
                                 msg_motoboy = urllib.parse.quote(
                                     f"🛵 *Entrega {NOME_EMPRESA} — Sacola {num_sacola}*\n"
                                     f"*Cliente:* {ped['cliente']} ({ped.get('telefone', '')})\n"
                                     f"*Endereço:* {ped.get('endereco', '')}\n"
-                                    f"*Pagamento:* {'✅ JÁ PAGO' if esta_pago else f'⏳ COBRAR R$ {float(ped[\"total\"]):.2f}'}\n"
+                                    f"*Pagamento:* {status_pag_motoboy}\n"
                                     f"*Rota:* {rota_txt}"
                                 )
                                 st.link_button("🗺️ Enviar p/ Entregador", f"https://wa.me/?text={msg_motoboy}", use_container_width=True)
                         else:
                             if tel_wa:
                                 itens_msg_ret = ped["itens"].replace(" | ", "\n• ")
+                                status_pag_ret = "Pix Pago ✅" if esta_pago else "Pagamento Pendente ⏳"
                                 msg_pronto = urllib.parse.quote(
                                     f"Oi {ped['cliente']}! 🛍️✨ Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* já está prontinho para retirada!\n\n"
                                     f"*Itens:*\n• {itens_msg_ret}\n"
-                                    f"*Total:* R$ {float(ped['total']):.2f} ({'Pix Pago ✅' if esta_pago else 'Pagamento Pendente ⏳'})\n\n"
+                                    f"*Total:* R$ {float(ped['total']):.2f} ({status_pag_ret})\n\n"
                                     f"📍 *Endereço:* {ENDERECO_LOJA}\n"
                                     f"🗺️ *Localização:* {LINK_MAPS_LOJA}"
                                 )
