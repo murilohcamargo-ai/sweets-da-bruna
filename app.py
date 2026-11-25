@@ -23,8 +23,8 @@ ARQUIVO_LOGO = "logo.png"
 SUPABASE_URL = "https://urghdzleaeocrsrvcnzx.supabase.co"
 SUPABASE_KEY = "sb_publishable_Xmc5ZOqss7NH2fuQgIvyFg_iy5DYwN6"
 
-WHATSAPP_LOJA = "5566999999999"       # DDI + DDD + Número da Bruna (só números)
-CPF_ADMIN = "062.582.881-03"          # CPF da Bruna (aceita com ou sem pontos)
+WHATSAPP_LOJA = "5566999892764"       # WhatsApp oficial da loja (55 + 66 + 999892764)
+CPF_ADMIN = "062.582.881-03"          # CPF da Bruna
 SENHA_ADMIN = "1234"                  # Senha de acesso
 CHAVE_PIX = "36810827000108"          # Chave Pix da empresa
 NOME_RECEBEDOR = "SWEETS DA BRUNA"    # Até 25 letras, sem acento
@@ -218,7 +218,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONTROLE DE SESSÃO PERSISTENTE (CPF + SENHA SALVOS NO NAVEGADOR) ---
+# --- CONTROLE DE SESSÃO PERSISTENTE ---
 def gerar_token_admin() -> str:
     cpf_limpo = re.sub(r"\D", "", CPF_ADMIN)
     segredo = f"SWEETS_AUTH_{cpf_limpo}_{SENHA_ADMIN}_{CNPJ_EMPRESA}"
@@ -239,13 +239,33 @@ def gerar_proximo_numero_dia() -> int:
     salvar_config_loja(cfg)
     return proximo
 
-# --- RESUMO FINANCEIRO DO DIA ---
+# --- CANCELAMENTO E DEVOLUÇÃO AUTOMÁTICA AO ESTOQUE ---
+def cancelar_pedido_e_devolver_estoque(pedido: dict):
+    produtos_db = listar_produtos()
+    mapa_por_nome = {p["nome"].strip().lower(): p for p in produtos_db}
+
+    for parte in (pedido.get("itens") or "").split(" | "):
+        m = re.match(r"^(\d+)x\s+(.+?)\s+\(R\$", parte)
+        if m:
+            qtd_devolver = int(m.group(1))
+            nome_doce = m.group(2).strip().lower()
+            prod = mapa_por_nome.get(nome_doce)
+            if prod:
+                novo_est = int(prod["estoque"]) + qtd_devolver
+                supabase.table("produtos").update({"estoque": novo_est}).eq("id", prod["id"]).execute()
+
+    supabase.table("pedidos").update({
+        "status": "cancelado",
+        "itens_acrescentados": ""
+    }).eq("id", pedido["id"]).execute()
+
+# --- RESUMO FINANCEIRO DO DIA (EXCLUI CANCELADOS) ---
 def obter_resumo_financeiro_dia(produtos: list, config: dict) -> dict:
     valor_falta_vender = sum(float(p["preco"]) * int(p["estoque"]) for p in produtos)
     qtd_falta_vender = sum(int(p["estoque"]) for p in produtos)
 
     inicio_dia = config.get("inicio_dia")
-    query = supabase.table("pedidos").select("total, frete, itens")
+    query = supabase.table("pedidos").select("total, frete, itens").neq("status", "cancelado")
     if inicio_dia:
         query = query.gte("criado_em", inicio_dia)
     pedidos_dia = query.execute().data or []
@@ -273,10 +293,10 @@ def obter_resumo_financeiro_dia(produtos: list, config: dict) -> dict:
         "percentual": percentual_vendido,
     }
 
-# --- RELATÓRIOS POR PERÍODO ---
+# --- RELATÓRIOS POR PERÍODO (EXCLUI CANCELADOS) ---
 def gerar_relatorio_periodo(periodo: str, produtos: list) -> dict:
     agora = datetime.now()
-    query = supabase.table("pedidos").select("total, frete, itens, criado_em")
+    query = supabase.table("pedidos").select("total, frete, itens, criado_em").neq("status", "cancelado")
 
     if periodo == "Hoje":
         inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -493,6 +513,19 @@ def modal_logo_loja():
             st.toast("Logo atualizada com sucesso!")
             st.rerun()
 
+@st.dialog("❌ Cancelar Pedido")
+def modal_cancelar_pedido(pedido):
+    num_sacola = f"#{int(pedido.get('numero_dia') or pedido['id']):02d}"
+    st.warning(f"Tem certeza que deseja cancelar a **Sacola {num_sacola}** de **{pedido['cliente']}**?")
+    st.write("**Itens que voltarão automaticamente para o estoque:**")
+    for parte in (pedido.get("itens") or "").split(" | "):
+        st.write(f"• {parte}")
+
+    if st.button("🗑️ Confirmar Cancelamento e Devolver ao Estoque", type="primary", use_container_width=True):
+        cancelar_pedido_e_devolver_estoque(pedido)
+        st.toast(f"Sacola {num_sacola} cancelada e itens devolvidos ao estoque!")
+        st.rerun()
+
 @st.dialog("📦 Quantos você fez hoje?")
 def modal_estoque(produto):
     if produto.get("imagem_url"):
@@ -594,6 +627,8 @@ if "carrinho" not in st.session_state:
     st.session_state.carrinho = {}
 if "pedido_concluido" not in st.session_state:
     st.session_state.pedido_concluido = None
+if "abrir_wa_auto" not in st.session_state:
+    st.session_state.abrir_wa_auto = False
 if "buscar_gps" not in st.session_state:
     st.session_state.buscar_gps = False
 if "dados_entrega" not in st.session_state:
@@ -723,7 +758,13 @@ if modo == "🧁 Vitrine do Cliente":
             st.warning("🔴 A loja fechou agora e não é possível finalizar novos pedidos no momento.")
         elif st.session_state.pedido_concluido:
             dados = st.session_state.pedido_concluido
-            st.success("🎉 Pedido reservado com sucesso!")
+
+            # Redirecionamento automático para o WhatsApp da loja na confirmação do pedido
+            if st.session_state.abrir_wa_auto:
+                streamlit_js_eval(js_expressions=f"window.open('{dados['link_wa']}', '_blank')", key=f"wa_auto_{dados['numero_dia']}")
+                st.session_state.abrir_wa_auto = False
+
+            st.success("🎉 Pedido reservado e enviado para o WhatsApp da loja!")
 
             st.markdown(
                 f"""
@@ -747,7 +788,7 @@ if modo == "🧁 Vitrine do Cliente":
             st.markdown(f"### Total a Pagar: R$ {dados['total']:.2f}")
             st.caption(f"Favorecido: **{NOME_EMPRESA}** • CNPJ: **{CNPJ_EMPRESA}**")
             st.code(dados["pix_code"], language=None)
-            st.link_button("📲 Enviar Pedido e Comprovante no WhatsApp", dados["link_wa"], type="primary", use_container_width=True)
+            st.link_button("📲 Abrir WhatsApp da Loja / Enviar Comprovante", dados["link_wa"], type="primary", use_container_width=True)
 
             if st.button("Fazer novo pedido", use_container_width=True):
                 st.session_state.pedido_concluido = None
@@ -841,7 +882,7 @@ if modo == "🧁 Vitrine do Cliente":
             if tel_raw:
                 st.caption(f"📱 Contato formatado: **{tel_formatado}**" if tel_valido else "⚠️ Digite DDD + número (ex: 6699999999 -> **669.999-9999**)")
 
-            if st.button("✅ Confirmar Pedido e Gerar Pix", type="primary", use_container_width=True):
+            if st.button("✅ Confirmar Pedido e Enviar no WhatsApp", type="primary", use_container_width=True):
                 if not bool(obter_config_loja().get("aberta", True)):
                     st.error("🔴 A loja fechou.")
                 elif not nome_cli.strip() or not tel_valido:
@@ -902,12 +943,13 @@ if modo == "🧁 Vitrine do Cliente":
                             msg.append(f"*🛵 Rota p/ Entregador:* {link_rota_entregador}")
                         if premio and premio.get("ganhou"):
                             msg.append(f"\n🎁 *Ganhei o cupom fidelidade:* {premio['codigo']} ({int(premio['desconto'])}% OFF)")
-                        msg.append("*Pagamento:* Pix (enviando comprovante)")
+                        msg.append("*Pagamento:* Pix (confirmando pedido e enviando comprovante)")
 
                         link_wa = f"https://wa.me/{WHATSAPP_LOJA}?text={urllib.parse.quote(chr(10).join(msg))}"
 
                         st.session_state.carrinho = {}
                         st.session_state.cupom_aplicado = None
+                        st.session_state.abrir_wa_auto = True
                         st.session_state.pedido_concluido = {
                             "numero_dia": num_dia,
                             "total": total_geral,
@@ -997,9 +1039,10 @@ elif modo == "🔐 Área da Confeiteira":
                 st.metric("📦 Falta Vender", f"R$ {resumo['falta_rs']:.2f}", delta=f"{resumo['falta_un']} un.", delta_color="off")
             st.progress(min(1.0, resumo["percentual"] / 100.0))
 
-        aba_fila, aba_separados, aba_estoque, aba_novo, aba_cupons, aba_ranking, aba_relatorios, aba_excel = st.tabs([
+        aba_fila, aba_separados, aba_cancelados, aba_estoque, aba_novo, aba_cupons, aba_ranking, aba_relatorios, aba_excel = st.tabs([
             "📦 A Separar",
             "✅ Separados",
+            "❌ Cancelados",
             "📸 Produção",
             "➕ Novo",
             "🎟️ Cupons",
@@ -1010,7 +1053,7 @@ elif modo == "🔐 Área da Confeiteira":
 
         # --- ABA 1: SACOLAS A SEPARAR ---
         with aba_fila:
-            pedidos_ativos = supabase.table("pedidos").select("*").neq("status", "concluido").order("id", desc=False).execute().data
+            pedidos_ativos = supabase.table("pedidos").select("*").in_("status", ["pendente", "separando"]).order("id", desc=False).execute().data
 
             if not pedidos_ativos:
                 st.success("🎉 Tudo separado! Nenhuma sacola pendente agora.")
@@ -1102,10 +1145,13 @@ elif modo == "🔐 Área da Confeiteira":
                             )
                             st.link_button(f"🗺️ Mandar Rota da Sacola {num_sacola} p/ Entregador", f"https://wa.me/?text={msg_motoboy}", use_container_width=True)
 
+                        if st.button(f"❌ Cancelar Sacola {num_sacola}", key=f"cancel_fila_{ped['id']}", use_container_width=True):
+                            modal_cancelar_pedido(ped)
+
         # --- ABA 2: PEDIDOS SEPARADOS ---
         with aba_separados:
             st.markdown("### ✅ Pedidos Já Separados")
-            st.caption("Precisa acrescentar mais algum doce em uma sacola já separada? Clique em **Editar / Acrescentar**:")
+            st.caption("Precisa acrescentar mais algum doce ou cancelar uma sacola já separada? Use os botões ao lado:")
 
             pedidos_concluidos = supabase.table("pedidos").select("*").eq("status", "concluido").order("id", desc=True).limit(40).execute().data
             if not pedidos_concluidos:
@@ -1114,17 +1160,43 @@ elif modo == "🔐 Área da Confeiteira":
                 for ped in pedidos_concluidos:
                     num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
                     with st.container(border=True):
-                        c_s1, c_s2 = st.columns([2.4, 1.3])
+                        c_s1, c_s2 = st.columns([2.3, 1.4])
                         with c_s1:
                             st.markdown(f"**🟢 Sacola {num_sacola} — {ped['cliente']}** ({ped.get('telefone', '')})")
                             st.write(ped["itens"])
                             st.caption(f"Total: **R$ {float(ped['total']):.2f}** • {ped['entrega']}")
                         with c_s2:
-                            st.write("")
                             if st.button("✏️ Editar / Acrescentar", key=f"edit_sep_{ped['id']}", use_container_width=True):
                                 modal_editar_pedido_separado(ped, produtos_atual)
+                            if st.button("❌ Cancelar Pedido", key=f"cancel_sep_{ped['id']}", use_container_width=True):
+                                modal_cancelar_pedido(ped)
 
-        # --- ABA 3: PRODUÇÃO DO DIA ---
+        # --- ABA 3: PEDIDOS CANCELADOS ---
+        with aba_cancelados:
+            st.markdown("### ❌ Pedidos Cancelados")
+            st.caption("Pedidos cancelados tiveram seus doces devolvidos automaticamente ao estoque.")
+            pedidos_canc = supabase.table("pedidos").select("*").eq("status", "cancelado").order("id", desc=True).limit(30).execute().data
+            if not pedidos_canc:
+                st.info("Nenhum pedido cancelado.")
+            else:
+                for ped in pedidos_canc:
+                    num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
+                    tel_limpo = re.sub(r"\D", "", ped.get("telefone", ""))
+                    tel_wa = f"55{tel_limpo}" if len(tel_limpo) in (10, 11) else ""
+                    with st.container(border=True):
+                        cc1, cc2 = st.columns([2.4, 1.3])
+                        with cc1:
+                            st.markdown(f"**🔴 Sacola {num_sacola} — {ped['cliente']}** ({ped.get('telefone', '')})")
+                            st.write(ped["itens"])
+                            st.caption(f"Valor cancelado: R$ {float(ped['total']):.2f}")
+                        with cc2:
+                            if tel_wa:
+                                msg_canc = urllib.parse.quote(
+                                    f"Oi {ped['cliente']}! Passando para avisar que o seu *Pedido {num_sacola}* na *{NOME_EMPRESA}* foi cancelado conforme combinado. Qualquer dúvida estamos à disposição! 🧁"
+                                )
+                                st.link_button("📲 Avisar Cliente", f"https://wa.me/{tel_wa}?text={msg_canc}", use_container_width=True)
+
+        # --- ABA 4: PRODUÇÃO DO DIA ---
         with aba_estoque:
             st.caption("Toque no doce para informar quantos você fez hoje:")
             if not produtos_atual:
@@ -1146,7 +1218,7 @@ elif modo == "🔐 Área da Confeiteira":
                             if st.button("✏️ Informar Qtd", key=f"adm_{prod['id']}", use_container_width=True):
                                 modal_estoque(prod)
 
-        # --- ABA 4: NOVO DOCE ---
+        # --- ABA 5: NOVO DOCE ---
         with aba_novo:
             with st.form("novo_doce", clear_on_submit=True):
                 foto_p = st.file_uploader("1. Escolha a foto do doce", type=["jpg", "jpeg", "png"])
@@ -1161,7 +1233,7 @@ elif modo == "🔐 Área da Confeiteira":
                         st.success(f"'{nome_p}' salvo! Agora clique nele na aba **📸 Produção** para colocar a quantidade.")
                         st.rerun()
 
-        # --- ABA 5: CUPONS & FIDELIDADE ---
+        # --- ABA 6: CUPONS & FIDELIDADE ---
         with aba_cupons:
             with st.container(border=True):
                 st.markdown("### 🎁 Cupom Automático por Meta Progressiva")
@@ -1202,10 +1274,10 @@ elif modo == "🔐 Área da Confeiteira":
                         supabase.table("cupons").delete().eq("id", cup["id"]).execute()
                         st.rerun()
 
-        # --- ABA 6: TOP 5 CLIENTES ---
+        # --- ABA 7: TOP 5 CLIENTES ---
         with aba_ranking:
             st.markdown("### 🏆 Top 5 Clientes com Mais Pedidos")
-            todos = supabase.table("pedidos").select("cliente, telefone, total").execute().data
+            todos = supabase.table("pedidos").select("cliente, telefone, total").neq("status", "cancelado").execute().data
             if not todos:
                 st.info("Ainda não há pedidos registrados.")
             else:
@@ -1236,7 +1308,7 @@ elif modo == "🔐 Área da Confeiteira":
                                 )
                                 st.link_button("🎁 Mandar Brinde", f"https://wa.me/55{tel_limpo}?text={msg_brinde}", use_container_width=True)
 
-        # --- ABA 7: RELATÓRIOS ---
+        # --- ABA 8: RELATÓRIOS ---
         with aba_relatorios:
             st.markdown("### 📈 Desempenho & Acumulado")
             filtro_periodo = st.radio("Selecione o período:", ["Hoje", "Este Mês", "Este Ano", "Todo o Período"], horizontal=True)
@@ -1270,9 +1342,9 @@ elif modo == "🔐 Área da Confeiteira":
                 for idx_p, item_p in enumerate(rel["ranking_produtos"], start=1):
                     st.write(f"**{idx_p}º.** {item_p['nome']} — **{item_p['qtd']} un.** (R$ {item_p['receita']:.2f})")
 
-        # --- ABA 8: EXCEL ---
+        # --- ABA 9: EXCEL ---
         with aba_excel:
-            pedidos = supabase.table("pedidos").select("*").order("id", desc=True).execute().data
+            pedidos = supabase.table("pedidos").select("*").neq("status", "cancelado").order("id", desc=True).execute().data
             if not pedidos:
                 st.info("Nenhum pedido registrado ainda.")
             else:
