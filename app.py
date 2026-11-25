@@ -217,6 +217,49 @@ st.markdown("""
         border: none !important;
         box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04) !important;
     }
+
+    .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 6px 0 10px 0;
+    }
+    .badge-entrega {
+        background: #EFF6FF;
+        color: #1D4ED8;
+        border: 1px solid #BFDBFE;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 800;
+    }
+    .badge-retirada {
+        background: #F5F3FF;
+        color: #6D28D9;
+        border: 1px solid #DDD6FE;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 800;
+    }
+    .badge-pago {
+        background: #ECFDF5;
+        color: #047857;
+        border: 1px solid #A7F3D0;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 800;
+    }
+    .badge-pendente {
+        background: #FEF3C7;
+        color: #B45309;
+        border: 1px solid #FDE68A;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 800;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -240,6 +283,19 @@ def gerar_proximo_numero_dia() -> int:
     cfg["ultimo_numero_dia"] = proximo
     salvar_config_loja(cfg)
     return proximo
+
+def renderizar_etiquetas_pedido(entrega: str, pago: bool):
+    badge_tipo = (
+        "<span class='badge-entrega'>🛵 ENTREGA (DELIVERY)</span>"
+        if entrega == "Entrega (Delivery)"
+        else "<span class='badge-retirada'>🛍️ RETIRADA NO LOCAL</span>"
+    )
+    badge_pag = (
+        "<span class='badge-pago'>✅ PIX PAGO</span>"
+        if pago
+        else "<span class='badge-pendente'>⏳ PIX PENDENTE</span>"
+    )
+    st.markdown(f"<div class='badge-row'>{badge_tipo}{badge_pag}</div>", unsafe_allow_html=True)
 
 # --- CANCELAMENTO E DEVOLUÇÃO AUTOMÁTICA AO ESTOQUE ---
 def cancelar_pedido_e_devolver_estoque(pedido: dict):
@@ -630,11 +686,15 @@ def modal_editar_pedido_separado(pedido, produtos):
             itens_completos = f"{pedido['itens']} | {str_acrescimo}"
             novo_total = float(pedido["total"]) + valor_extra
 
+            # Mantém o status de pagamento (se já estava pago, volta como separado_pendente porém marcado pago)
+            status_atual_ped = pedido.get("status", "")
+            novo_status = "a_separar_pago" if "pago" in status_atual_ped else "pendente"
+
             supabase.table("pedidos").update({
                 "itens": itens_completos,
                 "itens_acrescentados": str_acrescimo,
                 "total": novo_total,
-                "status": "separando"
+                "status": novo_status
             }).eq("id", pedido["id"]).execute()
 
             st.toast(f"Sacola {num_sacola} voltou para separar apenas os itens acrescentados!")
@@ -1084,19 +1144,19 @@ elif modo == "🔐 Área da Confeiteira":
             "📊 Excel"
         ])
 
-        # --- ABA 1: SACOLAS A SEPARAR + ESTOQUE LIVRE ---
+        # --- ABA 1: SACOLAS A SEPARAR (SOMENTE CONFIRMAÇÃO DO FUNCIONÁRIO) ---
         with aba_fila:
-            pedidos_ativos = supabase.table("pedidos").select("*").in_("status", ["pendente", "separando"]).order("id", desc=False).execute().data
+            pedidos_a_separar = supabase.table("pedidos").select("*").in_("status", ["pendente", "a_separar_pago"]).order("id", desc=False).execute().data
 
             c_gel1, c_gel2 = st.columns(2)
             with c_gel1:
                 with st.container(border=True):
                     st.markdown("**🧊 Pegar da geladeira (A Separar)**")
-                    if not pedidos_ativos:
+                    if not pedidos_a_separar:
                         st.caption("Nenhum item pendente para separar.")
                     else:
                         resumo_geladeira = {}
-                        for ped in pedidos_ativos:
+                        for ped in pedidos_a_separar:
                             texto_alvo = ped.get("itens_acrescentados") if ped.get("itens_acrescentados") else ped["itens"]
                             for parte in texto_alvo.split(" | "):
                                 m = re.match(r"^(\d+)x\s+(.+?)\s+\(R\$", parte)
@@ -1120,110 +1180,138 @@ elif modo == "🔐 Área da Confeiteira":
                             else:
                                 st.caption(f"• 🔴 0 un. — {p['nome']} (Esgotado)")
 
-            if not pedidos_ativos:
-                st.success("🎉 Tudo separado! Nenhuma sacola pendente agora.")
+            if not pedidos_a_separar:
+                st.success("🎉 Tudo separado! Nenhuma sacola aguardando separação.")
             else:
                 st.divider()
 
-                for ped in pedidos_ativos:
+                for ped in pedidos_a_separar:
                     num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
                     status_atual = ped.get("status", "pendente")
+                    ja_pago = (status_atual == "a_separar_pago")
                     tem_acrescimo = bool(ped.get("itens_acrescentados"))
-                    tel_limpo = re.sub(r"\D", "", ped.get("telefone", ""))
-                    tel_wa = f"55{tel_limpo}" if len(tel_limpo) in (10, 11) else ""
 
                     with st.container(border=True):
-                        top_c1, top_c2 = st.columns([2.5, 1.2])
-                        with top_c1:
-                            st.markdown(f"## 🛍️ Sacola {num_sacola} — {ped['cliente']}")
-                            if tem_acrescimo:
-                                st.warning(f"⚠️ **ACRÉSCIMO NA SACOLA {num_sacola}** — Colocar apenas os itens abaixo:")
-                            else:
-                                st.caption(f"✍️ **Escreva {num_sacola} na sacola** • 📱 {ped.get('telefone', '')}")
-                        with top_c2:
-                            if status_atual == "pendente":
-                                st.warning("🟡 Aguardando Pix")
-                            else:
-                                st.info("🔵 Separando")
+                        st.markdown(f"## 🛍️ Sacola {num_sacola} — {ped['cliente']}")
+                        renderizar_etiquetas_pedido(ped["entrega"], ja_pago)
+
+                        if tem_acrescimo:
+                            st.warning(f"⚠️ **ACRÉSCIMO NA SACOLA {num_sacola}** — Colocar apenas os itens abaixo:")
+                        else:
+                            st.caption(f"✍️ **Escreva {num_sacola} na sacola** • 📱 {ped.get('telefone', '')}")
 
                         itens_para_conferir = ped["itens_acrescentados"] if tem_acrescimo else ped["itens"]
-                        st.markdown("**Marque conforme colocar na sacola:**")
+                        st.markdown("**Marque cada doce conforme colocar na sacola:**")
                         for idx_i, parte in enumerate(itens_para_conferir.split(" | ")):
                             limpo = re.sub(r"\s+\(R\$.*?\)$", "", parte)
                             st.checkbox(limpo, key=f"chk_{ped['id']}_{idx_i}_{len(itens_para_conferir)}")
 
-                        st.write(f"**Total da Sacola:** R$ {float(ped['total']):.2f} • **{ped['entrega']}**")
-                        if ped.get("endereco"):
-                            st.caption(f"📍 {ped['endereco']}")
+                        st.write(f"**Total:** R$ {float(ped['total']):.2f}")
+                        if ped["entrega"] == "Entrega (Delivery)" and ped.get("endereco"):
+                            st.caption(f"📍 Endereço: {ped['endereco']}")
 
-                        b1, b2, b3 = st.columns(3)
-                        with b1:
-                            if status_atual == "pendente":
-                                if st.button("✅ Confirmar Pix", key=f"pix_{ped['id']}", use_container_width=True):
-                                    supabase.table("pedidos").update({"status": "separando"}).eq("id", ped["id"]).execute()
+                        col_ok, col_canc = st.columns([2.2, 1])
+                        with col_ok:
+                            if st.button("✔️ Marcar como Separado", key=f"sep_ok_{ped['id']}", type="primary", use_container_width=True):
+                                novo_st = "separado_pago" if ja_pago else "separado_pendente"
+                                supabase.table("pedidos").update({
+                                    "status": novo_st,
+                                    "itens_acrescentados": ""
+                                }).eq("id", ped["id"]).execute()
+                                st.toast(f"Sacola {num_sacola} marcada como separada!")
+                                st.rerun()
+                        with col_canc:
+                            if st.button("❌ Cancelar", key=f"cancel_fila_{ped['id']}", use_container_width=True):
+                                modal_cancelar_pedido(ped)
+
+        # --- ABA 2: PEDIDOS SEPARADOS (PAGAMENTO, AVISAR CLIENTE E ENTREGADOR) ---
+        with aba_separados:
+            st.markdown("### ✅ Sacolas Separadas — Pagamento & Envio")
+            st.caption("Confirme o Pix do cliente, avise quando estiver pronto/saiu e envie a rota ao entregador:")
+
+            pedidos_separados = supabase.table("pedidos").select("*").in_("status", ["separado_pendente", "separado_pago", "concluido", "separando"]).order("id", desc=True).limit(50).execute().data
+            if not pedidos_separados:
+                st.info("Nenhuma sacola separada ainda.")
+            else:
+                for ped in pedidos_separados:
+                    num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
+                    st_ped = ped.get("status", "separado_pendente")
+                    esta_pago = st_ped in ("separado_pago", "concluido")
+                    tel_limpo = re.sub(r"\D", "", ped.get("telefone", ""))
+                    tel_wa = f"55{tel_limpo}" if len(tel_limpo) in (10, 11) else ""
+
+                    with st.container(border=True):
+                        st.markdown(f"### 🛍️ Sacola {num_sacola} — {ped['cliente']}")
+                        renderizar_etiquetas_pedido(ped["entrega"], esta_pago)
+
+                        st.write(f"**Itens:** {ped['itens']}")
+                        st.write(f"**Total:** R$ {float(ped['total']):.2f} • **Contato:** {ped.get('telefone', '')}")
+                        if ped["entrega"] == "Entrega (Delivery)" and ped.get("endereco"):
+                            st.caption(f"📍 **Endereço de Entrega:** {ped['endereco']}")
+
+                        # --- BLOCO DE CONTROLE FÁCIL DE PAGAMENTO ---
+                        if not esta_pago:
+                            st.warning(f"⏳ **Pagamento Pendente (R$ {float(ped['total']):.2f})** — Confirme abaixo assim que o Pix cair:")
+                            cp1, cp2 = st.columns(2)
+                            with cp1:
+                                if st.button("✅ Confirmar Pix Pago", key=f"pg_ok_{ped['id']}", type="primary", use_container_width=True):
+                                    supabase.table("pedidos").update({"status": "separado_pago"}).eq("id", ped["id"]).execute()
+                                    st.toast(f"Pagamento da Sacola {num_sacola} confirmado!")
                                     st.rerun()
-                            elif tel_wa:
-                                msg_pix = urllib.parse.quote(
-                                    f"Oi {ped['cliente']}! 🧁 Recebemos o Pix do seu *Pedido {num_sacola}* aqui na *{NOME_EMPRESA}*. Já estou separando seus doces!"
-                                )
-                                st.link_button("📲 Avisar Pix OK", f"https://wa.me/{tel_wa}?text={msg_pix}", use_container_width=True)
+                            with cp2:
+                                if tel_wa:
+                                    msg_cobrar = urllib.parse.quote(
+                                        f"Oi {ped['cliente']}! 🧁 Tudo bem? Sua *Sacola {num_sacola}* na *{NOME_EMPRESA}* já está separadinha! "
+                                        f"Estamos só aguardando a confirmação do Pix de *R$ {float(ped['total']):.2f}* para liberar. Qualquer coisa me manda o comprovante por aqui! 💕"
+                                    )
+                                    st.link_button("💬 Lembrar Pix no WhatsApp", f"https://wa.me/{tel_wa}?text={msg_cobrar}", use_container_width=True)
+                        else:
+                            cp_pago1, cp_pago2 = st.columns([2.5, 1.2])
+                            with cp_pago1:
+                                st.success(f"✅ **Pagamento Confirmado (R$ {float(ped['total']):.2f})**")
+                            with cp_pago2:
+                                if st.button("↩️ Voltar p/ Pendente", key=f"pg_undo_{ped['id']}", use_container_width=True):
+                                    supabase.table("pedidos").update({"status": "separado_pendente"}).eq("id", ped["id"]).execute()
+                                    st.rerun()
 
-                        with b2:
-                            if tel_wa:
-                                if ped["entrega"] == "Entrega (Delivery)":
+                        # --- BOTÕES DE AVISAR CLIENTE E MANDAR PARA ENTREGADOR ---
+                        st.markdown("**📲 Comunicação & Despacho:**")
+                        if ped["entrega"] == "Entrega (Delivery)":
+                            ca1, ca2 = st.columns(2)
+                            with ca1:
+                                if tel_wa:
                                     msg_saiu = urllib.parse.quote(
                                         f"Oi {ped['cliente']}! 🛵💨 Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* acabou de sair para entrega!"
                                     )
-                                    st.link_button("🛵 Avisar Saiu", f"https://wa.me/{tel_wa}?text={msg_saiu}", use_container_width=True)
-                                else:
-                                    itens_msg_ret = ped["itens"].replace(" | ", "\n• ")
-                                    msg_pronto = urllib.parse.quote(
-                                        f"Oi {ped['cliente']}! 🛍️✨ Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* já está prontinho para retirada!\n\n"
-                                        f"*Itens:*\n• {itens_msg_ret}\n"
-                                        f"*Total:* R$ {float(ped['total']):.2f}\n\n"
-                                        f"📍 *Endereço:* {ENDERECO_LOJA}\n"
-                                        f"🗺️ *Localização:* {LINK_MAPS_LOJA}"
-                                    )
-                                    st.link_button("🛍️ Avisar Pronto + Mapa", f"https://wa.me/{tel_wa}?text={msg_pronto}", use_container_width=True)
+                                    st.link_button("🛵 Avisar Cliente (Saiu)", f"https://wa.me/{tel_wa}?text={msg_saiu}", type="primary", use_container_width=True)
+                            with ca2:
+                                rota_txt = ped.get("rota_maps") or ""
+                                msg_motoboy = urllib.parse.quote(
+                                    f"🛵 *Entrega {NOME_EMPRESA} — Sacola {num_sacola}*\n"
+                                    f"*Cliente:* {ped['cliente']} ({ped.get('telefone', '')})\n"
+                                    f"*Endereço:* {ped.get('endereco', '')}\n"
+                                    f"*Pagamento:* {'✅ JÁ PAGO' if esta_pago else f'⏳ COBRAR R$ {float(ped[\"total\"]):.2f}'}\n"
+                                    f"*Rota:* {rota_txt}"
+                                )
+                                st.link_button("🗺️ Enviar p/ Entregador", f"https://wa.me/?text={msg_motoboy}", use_container_width=True)
+                        else:
+                            if tel_wa:
+                                itens_msg_ret = ped["itens"].replace(" | ", "\n• ")
+                                msg_pronto = urllib.parse.quote(
+                                    f"Oi {ped['cliente']}! 🛍️✨ Seu *Pedido {num_sacola}* da *{NOME_EMPRESA}* já está prontinho para retirada!\n\n"
+                                    f"*Itens:*\n• {itens_msg_ret}\n"
+                                    f"*Total:* R$ {float(ped['total']):.2f} ({'Pix Pago ✅' if esta_pago else 'Pagamento Pendente ⏳'})\n\n"
+                                    f"📍 *Endereço:* {ENDERECO_LOJA}\n"
+                                    f"🗺️ *Localização:* {LINK_MAPS_LOJA}"
+                                )
+                                st.link_button("🛍️ Avisar Cliente (Pronto + Localização)", f"https://wa.me/{tel_wa}?text={msg_pronto}", type="primary", use_container_width=True)
 
-                        with b3:
-                            if st.button("✔️ Concluir Sacola", key=f"done_{ped['id']}", type="primary", use_container_width=True):
-                                supabase.table("pedidos").update({
-                                    "status": "concluido",
-                                    "itens_acrescentados": ""
-                                }).eq("id", ped["id"]).execute()
-                                st.toast(f"Sacola {num_sacola} movida para 'Pedidos Separados'!")
-                                st.rerun()
-
-                        if ped["entrega"] == "Entrega (Delivery)" and ped.get("rota_maps"):
-                            msg_motoboy = urllib.parse.quote(
-                                f"🛵 *Entrega {NOME_EMPRESA} — Sacola {num_sacola}*\n*Cliente:* {ped['cliente']} ({ped.get('telefone', '')})\n*Endereço:* {ped.get('endereco', '')}\n*Rota:* {ped['rota_maps']}"
-                            )
-                            st.link_button(f"🗺️ Mandar Rota da Sacola {num_sacola} p/ Entregador", f"https://wa.me/?text={msg_motoboy}", use_container_width=True)
-
-                        if st.button(f"❌ Cancelar Sacola {num_sacola}", key=f"cancel_fila_{ped['id']}", use_container_width=True):
-                            modal_cancelar_pedido(ped)
-
-        # --- ABA 2: PEDIDOS SEPARADOS ---
-        with aba_separados:
-            st.markdown("### ✅ Pedidos Já Separados")
-            st.caption("Precisa acrescentar mais algum doce ou cancelar uma sacola já separada? Use os botões ao lado:")
-
-            pedidos_concluidos = supabase.table("pedidos").select("*").eq("status", "concluido").order("id", desc=True).limit(40).execute().data
-            if not pedidos_concluidos:
-                st.info("Nenhuma sacola concluída ainda.")
-            else:
-                for ped in pedidos_concluidos:
-                    num_sacola = f"#{int(ped.get('numero_dia') or ped['id']):02d}"
-                    with st.container(border=True):
-                        c_s1, c_s2 = st.columns([2.3, 1.4])
-                        with c_s1:
-                            st.markdown(f"**🟢 Sacola {num_sacola} — {ped['cliente']}** ({ped.get('telefone', '')})")
-                            st.write(ped["itens"])
-                            st.caption(f"Total: **R$ {float(ped['total']):.2f}** • {ped['entrega']}")
-                        with c_s2:
+                        # --- EDITAR / ACRESCENTAR OU CANCELAR ---
+                        ce1, ce2 = st.columns(2)
+                        with ce1:
                             if st.button("✏️ Editar / Acrescentar", key=f"edit_sep_{ped['id']}", use_container_width=True):
                                 modal_editar_pedido_separado(ped, produtos_atual)
+                        with ce2:
                             if st.button("❌ Cancelar Pedido", key=f"cancel_sep_{ped['id']}", use_container_width=True):
                                 modal_cancelar_pedido(ped)
 
