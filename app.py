@@ -31,9 +31,9 @@ CHAVE_PIX = "36810827000108"          # Chave Pix da empresa
 NOME_RECEBEDOR = "SWEETS DA BRUNA"    # Até 25 letras, sem acento
 CIDADE_RECEBEDOR = "RONDONOPOLIS"     # Até 15 letras, sem acento
 
-# --- LOCALIZAÇÃO DA DOCERIA (Rua Nicola Silveira, 470 - Jardim Primavera, Rondonópolis - MT) ---
-LAT_LOJA = -16.4478
-LON_LOJA = -54.6167
+# --- LOCALIZAÇÃO EXATA DA DOCERIA (Rua Nicola Silveira, 470 - Jardim Primavera, Rondonópolis - MT) ---
+LAT_LOJA = -16.448401
+LON_LOJA = -54.614900
 LINK_MAPS_LOJA = f"https://www.google.com/maps/search/?api=1&query={LAT_LOJA},{LON_LOJA}"
 
 # --- TABELA DE PREÇOS DO ENTREGADOR ---
