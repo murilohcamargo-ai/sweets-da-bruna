@@ -17,6 +17,7 @@ from PIL import Image
 # --- DADOS OFICIAIS DA EMPRESA ---
 NOME_EMPRESA = "Sweets da Bruna"
 CNPJ_EMPRESA = "36.810.827/0001-08"
+ENDERECO_LOJA = "Rua Nicola Silveira, 470 • Jardim Primavera I, Rondonópolis - MT"
 ARQUIVO_LOGO = "logo.png"
 
 # --- CREDENCIAIS E CONFIGURAÇÕES ---
@@ -541,6 +542,22 @@ def modal_estoque(produto):
         supabase.table("produtos").delete().eq("id", produto["id"]).execute()
         st.rerun()
 
+@st.dialog("🗑️ Excluir Doce do Catálogo")
+def modal_excluir_produto(produto):
+    if produto.get("imagem_url"):
+        st.image(produto["imagem_url"], width=160)
+    st.warning(f"Tem certeza que deseja excluir **{produto['nome']}** permanentemente do catálogo?")
+    st.caption("Ele deixará de aparecer na vitrine e na aba de produção.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Cancelar", use_container_width=True):
+            st.rerun()
+    with c2:
+        if st.button("🗑️ Sim, Excluir", type="primary", use_container_width=True):
+            supabase.table("produtos").delete().eq("id", produto["id"]).execute()
+            st.toast(f"'{produto['nome']}' excluído do catálogo!")
+            st.rerun()
+
 @st.dialog("🧁 Escolher Quantidade")
 def modal_selecionar_doce(produto):
     if produto.get("imagem_url"):
@@ -671,6 +688,7 @@ if logo_src:
             <div style='display: inline-block; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 999px; padding: 4px 14px; margin-top: 6px; font-size: 12px; font-weight: 600; color: #64748B;'>
                 CNPJ: {CNPJ_EMPRESA} • Pronta Entrega
             </div>
+            <div style='font-size: 11px; color: #64748B; margin-top: 4px;'>📍 {ENDERECO_LOJA}</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -691,6 +709,7 @@ else:
             <div style='display: inline-block; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 999px; padding: 4px 14px; margin-top: 6px; font-size: 12px; font-weight: 600; color: #64748B;'>
                 CNPJ: {CNPJ_EMPRESA} • Pronta Entrega
             </div>
+            <div style='font-size: 11px; color: #64748B; margin-top: 4px;'>📍 {ENDERECO_LOJA}</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -759,7 +778,6 @@ if modo == "🧁 Vitrine do Cliente":
         elif st.session_state.pedido_concluido:
             dados = st.session_state.pedido_concluido
 
-            # Redirecionamento automático para o WhatsApp da loja na confirmação do pedido
             if st.session_state.abrir_wa_auto:
                 streamlit_js_eval(js_expressions=f"window.open('{dados['link_wa']}', '_blank')", key=f"wa_auto_{dados['numero_dia']}")
                 st.session_state.abrir_wa_auto = False
@@ -1051,27 +1069,46 @@ elif modo == "🔐 Área da Confeiteira":
             "📊 Excel"
         ])
 
-        # --- ABA 1: SACOLAS A SEPARAR ---
+        # --- ABA 1: SACOLAS A SEPARAR + ESTOQUE LIVRE ---
         with aba_fila:
             pedidos_ativos = supabase.table("pedidos").select("*").in_("status", ["pendente", "separando"]).order("id", desc=False).execute().data
+
+            # Visão rápida: O que separar vs O que está disponível para venda
+            c_gel1, c_gel2 = st.columns(2)
+            with c_gel1:
+                with st.container(border=True):
+                    st.markdown("**🧊 Pegar da geladeira (A Separar)**")
+                    if not pedidos_ativos:
+                        st.caption("Nenhum item pendente para separar.")
+                    else:
+                        resumo_geladeira = {}
+                        for ped in pedidos_ativos:
+                            texto_alvo = ped.get("itens_acrescentados") if ped.get("itens_acrescentados") else ped["itens"]
+                            for parte in texto_alvo.split(" | "):
+                                m = re.match(r"^(\d+)x\s+(.+?)\s+\(R\$", parte)
+                                if m:
+                                    qtd_i = int(m.group(1))
+                                    nome_i = m.group(2)
+                                    resumo_geladeira[nome_i] = resumo_geladeira.get(nome_i, 0) + qtd_i
+                        for n, q in resumo_geladeira.items():
+                            st.write(f"• **{q}x** {n}")
+
+            with c_gel2:
+                with st.container(border=True):
+                    st.markdown("**🟢 Disponível para Venda (Vitrine)**")
+                    if not produtos_atual:
+                        st.caption("Nenhum doce cadastrado.")
+                    else:
+                        for p in produtos_atual:
+                            est_p = int(p["estoque"])
+                            if est_p > 0:
+                                st.write(f"• **{est_p} un.** — {p['nome']}")
+                            else:
+                                st.caption(f"• 🔴 0 un. — {p['nome']} (Esgotado)")
 
             if not pedidos_ativos:
                 st.success("🎉 Tudo separado! Nenhuma sacola pendente agora.")
             else:
-                resumo_geladeira = {}
-                for ped in pedidos_ativos:
-                    texto_alvo = ped.get("itens_acrescentados") if ped.get("itens_acrescentados") else ped["itens"]
-                    for parte in texto_alvo.split(" | "):
-                        m = re.match(r"^(\d+)x\s+(.+?)\s+\(R\$", parte)
-                        if m:
-                            qtd_i = int(m.group(1))
-                            nome_i = m.group(2)
-                            resumo_geladeira[nome_i] = resumo_geladeira.get(nome_i, 0) + qtd_i
-
-                with st.container(border=True):
-                    st.markdown("**🧊 Resumo: Pegar da geladeira agora**")
-                    st.write("  •  ".join([f"**{q}x** {n}" for n, q in resumo_geladeira.items()]))
-
                 st.divider()
 
                 for ped in pedidos_ativos:
@@ -1196,9 +1233,14 @@ elif modo == "🔐 Área da Confeiteira":
                                 )
                                 st.link_button("📲 Avisar Cliente", f"https://wa.me/{tel_wa}?text={msg_canc}", use_container_width=True)
 
-        # --- ABA 4: PRODUÇÃO DO DIA ---
+        # --- ABA 4: PRODUÇÃO DO DIA & ESTOQUE DISPONÍVEL ---
         with aba_estoque:
-            st.caption("Toque no doce para informar quantos você fez hoje:")
+            if produtos_atual:
+                total_disp_un = sum(int(p["estoque"]) for p in produtos_atual)
+                total_disp_rs = sum(int(p["estoque"]) * float(p["preco"]) for p in produtos_atual)
+                st.info(f"🟢 **Disponível para venda agora:** **{total_disp_un} unidade(s)** (Total em vitrine: **R$ {total_disp_rs:.2f}**)")
+
+            st.caption("Gerencie a quantidade disponível para venda hoje ou exclua doces do catálogo:")
             if not produtos_atual:
                 st.info("Você ainda não cadastrou nenhum doce. Vá na aba **➕ Novo** ao lado!")
             else:
@@ -1215,8 +1257,13 @@ elif modo == "🔐 Área da Confeiteira":
                                 st.success(f"Disponível: {est}")
                             else:
                                 st.error("Esgotado (0)")
-                            if st.button("✏️ Informar Qtd", key=f"adm_{prod['id']}", use_container_width=True):
-                                modal_estoque(prod)
+                            b_qtd, b_del = st.columns([1.4, 1])
+                            with b_qtd:
+                                if st.button("✏️ Qtd", key=f"adm_{prod['id']}", use_container_width=True):
+                                    modal_estoque(prod)
+                            with b_del:
+                                if st.button("🗑️ Excluir", key=f"del_{prod['id']}", use_container_width=True):
+                                    modal_excluir_produto(prod)
 
         # --- ABA 5: NOVO DOCE ---
         with aba_novo:
