@@ -1440,3 +1440,4 @@ st.divider()
 st.markdown(
     f"<div style='text-align: center; color: #64748B; font-size: 12px; font-weight: 500;'>{NOME_EMPRESA} • CNPJ: {CNPJ_EMPRESA}</div>",
     unsafe_allow_html=True
+)
